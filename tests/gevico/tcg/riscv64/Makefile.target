@@ -1,0 +1,6 @@
+# -*- Mode: makefile -*-
+# RISC-V specific tweaks
+
+VPATH += $(SRC_PATH)/tests/gevico/tcg/riscv64
+TESTS +=
+TESTS +=

@@ -16,6 +16,7 @@ check-help:
 	@echo " $(MAKE) check-block              Run block tests"
 ifneq ($(filter $(all-check-targets), check-softfloat),)
 	@echo " $(MAKE) check-tcg                Run TCG tests"
+	@echo " $(MAKE) check-gevico-tcg         Run Gevico TCG tests"
 	@echo " $(MAKE) check-softfloat          Run FPU emulation tests"
 endif
 	@echo
@@ -81,6 +82,52 @@ clean-tcg: $(CLEAN_TCG_TARGET_RULES)
 
 .PHONY: distclean-tcg
 distclean-tcg: $(DISTCLEAN_TCG_TARGET_RULES)
+
+# Per guest Gevico TCG tests
+BUILD_GEVICO_TCG_TARGET_RULES=$(patsubst %,build-gevico-tcg-tests-%, $(TCG_TESTS_TARGETS))
+CLEAN_GEVICO_TCG_TARGET_RULES=$(patsubst %,clean-gevico-tcg-tests-%, $(TCG_TESTS_TARGETS))
+DISTCLEAN_GEVICO_TCG_TARGET_RULES=$(patsubst %,distclean-gevico-tcg-tests-%, $(TCG_TESTS_TARGETS))
+RUN_GEVICO_TCG_TARGET_RULES=$(patsubst %,run-gevico-tcg-tests-%, $(TCG_TESTS_TARGETS))
+
+$(foreach TARGET,$(TCG_TESTS_TARGETS), \
+        $(eval $(BUILD_DIR)/tests/gevico/tcg/config-$(TARGET).mak: config-host.mak))
+
+.PHONY: $(TCG_TESTS_TARGETS:%=build-gevico-tcg-tests-%)
+$(TCG_TESTS_TARGETS:%=build-gevico-tcg-tests-%): build-gevico-tcg-tests-%: $(BUILD_DIR)/tests/gevico/tcg/config-%.mak
+	$(call quiet-command, \
+            $(MAKE) -C tests/gevico/tcg/$* $(SUBDIR_MAKEFLAGS), \
+        "BUILD","$* guest-tests")
+
+.PHONY: $(TCG_TESTS_TARGETS:%=run-gevico-tcg-tests-%)
+$(TCG_TESTS_TARGETS:%=run-gevico-tcg-tests-%): run-gevico-tcg-tests-%: build-gevico-tcg-tests-%
+	$(call quiet-command, \
+           $(MAKE) -C tests/gevico/tcg/$* $(SUBDIR_MAKEFLAGS) SPEED=$(SPEED) run, \
+        "RUN", "$* guest-tests")
+
+.PHONY: $(TCG_TESTS_TARGETS:%=clean-gevico-tcg-tests-%)
+$(TCG_TESTS_TARGETS:%=clean-gevico-tcg-tests-%): clean-gevico-tcg-tests-%:
+	$(call quiet-command, \
+           $(MAKE) -C tests/gevico/tcg/$* $(SUBDIR_MAKEFLAGS) clean, \
+        "CLEAN", "$* guest-tests")
+
+.PHONY: $(TCG_TESTS_TARGETS:%=distclean-gevico-tcg-tests-%)
+$(TCG_TESTS_TARGETS:%=distclean-gevico-tcg-tests-%): distclean-gevico-tcg-tests-%:
+	$(call quiet-command, \
+           $(MAKE) -C tests/gevico/tcg/$* $(SUBDIR_MAKEFLAGS) distclean, \
+        "CLEAN", "$* guest-tests")
+
+.PHONY: build-gevico-tcg
+build-gevico-tcg: $(BUILD_GEVICO_TCG_TARGET_RULES)
+
+.PHONY: check-gevico-tcg
+.ninja-goals.check-gevico-tcg = all test-plugins
+check-gevico-tcg: $(RUN_GEVICO_TCG_TARGET_RULES)
+
+.PHONY: clean-gevico-tcg
+clean-gevico-tcg: $(CLEAN_GEVICO_TCG_TARGET_RULES)
+
+.PHONY: distclean-gevico-tcg
+distclean-gevico-tcg: $(DISTCLEAN_GEVICO_TCG_TARGET_RULES)
 
 # Python venv for running tests
 

@@ -216,6 +216,7 @@ distclean: clean recurse-distclean
 	-$(quiet-@)test -f build.ninja && $(NINJA) $(NINJAFLAGS) -t clean -g || :
 	rm -f config-host.mak Makefile.prereqs
 	rm -f tests/tcg/*/config-target.mak tests/tcg/config-host.mak
+	rm -f tests/gevico/tcg/*/config-target.mak tests/gevico/tcg/config-host.mak
 	rm -f config.status
 	rm -f roms/seabios/config.mak
 	rm -f qemu-plugins-ld.symbols qemu-plugins-ld64.symbols
