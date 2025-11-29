@@ -2169,7 +2169,7 @@ static RISCVCPUProfile RVA23S64 = {
     .name = "rva23s64",
     .misa_ext = RVS,
     .priv_spec = PRIV_VERSION_1_13_0,
-    .satp_mode = VM_1_10_SV39,
+    .satp_mode = VM_1_10_SV48,
     .ext_offsets = {
         /* New in RVA23S64 */
         CPU_CFG_OFFSET(ext_svnapot), CPU_CFG_OFFSET(ext_sstc),
