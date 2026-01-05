@@ -2182,11 +2182,24 @@ static RISCVCPUProfile RVA23S64 = {
     }
 };
 
+static RISCVCPUProfile RVSP_RVA23S64 = {
+    .u_parent = &RVA23S64,
+    .s_parent = NULL,
+    .name = "rvsp-rva23s64",
+    .misa_ext = 0,
+    .priv_spec = RISCV_PROFILE_ATTR_UNUSED,
+    .satp_mode = VM_1_10_SV48,
+    .ext_offsets = {
+        RISCV_PROFILE_EXT_LIST_END
+    }
+};
+
 RISCVCPUProfile *riscv_profiles[] = {
     &RVA22U64,
     &RVA22S64,
     &RVA23U64,
     &RVA23S64,
+    &RVSP_RVA23S64,
     NULL,
 };
 
@@ -3307,7 +3320,7 @@ static const TypeInfo riscv_cpu_type_infos[] = {
 
     DEFINE_RISCV_CPU(TYPE_RISCV_CPU_RVSP_REF, TYPE_RISCV_BARE_CPU,
         .misa_mxl_max = MXL_RV64,
-        .profile = &RVA23S64,
+        .profile = &RVSP_RVA23S64,
 
         /*
          * ISA extensions
