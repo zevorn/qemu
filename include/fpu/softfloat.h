@@ -190,7 +190,7 @@ float128 uint64_to_float128(uint64_t, float_status *status);
 float128 uint128_to_float128(Int128, float_status *status);
 
 /*----------------------------------------------------------------------------
-| Software OCP FP8 conversion routines.
+| Software OCP FP conversion routines.
 *----------------------------------------------------------------------------*/
 
 bfloat16 float8_e4m3_to_bfloat16(float8_e4m3, float_status *status);
@@ -201,7 +201,7 @@ float8_e4m3 float32_to_float8_e4m3(float32, bool saturate, float_status *status)
 float8_e5m2 float32_to_float8_e5m2(float32, bool saturate, float_status *status);
 
 /*----------------------------------------------------------------------------
-| Software OCP FP8 operations.
+| Software OCP FP operations.
 *----------------------------------------------------------------------------*/
 
 bool float8_e4m3_is_quiet_nan(float8_e4m3, float_status *status);
@@ -268,6 +268,47 @@ static inline bool float8_e4m3_is_normal(float8_e4m3 a)
 static inline bool float8_e5m2_is_normal(float8_e5m2 a)
 {
     return (((float8_e5m2_val(a) >> 2) + 1) & 0x1f) >= 2;
+}
+
+static inline bool float4_e2m1_is_quiet_nan(float4_e2m1 a, float_status *status)
+{
+    return false;
+}
+
+static inline bool float4_e2m1_is_signaling_nan(float4_e2m1 a, float_status *status)
+{
+    return false;
+}
+
+static inline bool float4_e2m1_is_any_nan(float4_e2m1 a)
+{
+    return false;
+}
+
+static inline bool float4_e2m1_is_neg(float4_e2m1 a)
+{
+    return float4_e2m1_val(a) >> 3;
+}
+
+static inline bool float4_e2m1_is_infinity(float4_e2m1 a)
+{
+    return false;
+}
+
+static inline bool float4_e2m1_is_zero(float4_e2m1 a)
+{
+    return (float4_e2m1_val(a) & 0x7) == 0;
+}
+
+static inline bool float4_e2m1_is_zero_or_denormal(float4_e2m1 a)
+{
+    return (float4_e2m1_val(a) & 0x6) == 0;
+}
+
+static inline bool float4_e2m1_is_normal(float4_e2m1 a)
+{
+    uint8_t em = float4_e2m1_val(a) & 0x7;
+    return em >= 0x2 && em <= 0x7;
 }
 
 /*----------------------------------------------------------------------------
