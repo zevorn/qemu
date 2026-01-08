@@ -5025,6 +5025,99 @@ RVVCALL(OPFVV1, vfncvtbf16_f_f_w, NOP_UU_H, H2, H4, float32_to_bfloat16)
 GEN_VEXT_V_ENV(vfncvtbf16_f_f_w, 2)
 
 /*
+ * Vector OFP8 conversion operations for Zvfofp8min
+ *
+ * Note: The OCP FP8 conversion functions use flags in float_status to control
+ * the same_canonical_nan and only_quiet_nan behavior. RISC-V should set
+ * ocp_fp8_same_canonical_nan and ocp_fp8e5m2_no_signal_nan flags during CPU
+ * initialization to get the correct Zvfofp8min behavior.
+ */
+
+/* Wrapper functions for RVVCALL macro compatibility */
+static uint8_t vfncvt_bf16_to_e4m3(uint16_t a, float_status *s)
+{
+    return bfloat16_to_float8_e4m3(a, false, s);
+}
+
+static uint8_t vfncvt_bf16_to_e5m2(uint16_t a, float_status *s)
+{
+    return bfloat16_to_float8_e5m2(a, false, s);
+}
+
+static uint8_t vfncvt_bf16_to_e4m3_sat(uint16_t a, float_status *s)
+{
+    return bfloat16_to_float8_e4m3(a, true, s);
+}
+
+static uint8_t vfncvt_bf16_to_e5m2_sat(uint16_t a, float_status *s)
+{
+    return bfloat16_to_float8_e5m2(a, true, s);
+}
+
+static uint8_t vfncvt_f32_to_e4m3(uint32_t a, float_status *s)
+{
+    return float32_to_float8_e4m3(a, false, s);
+}
+
+static uint8_t vfncvt_f32_to_e5m2(uint32_t a, float_status *s)
+{
+    return float32_to_float8_e5m2(a, false, s);
+}
+
+static uint8_t vfncvt_f32_to_e4m3_sat(uint32_t a, float_status *s)
+{
+    return float32_to_float8_e4m3(a, true, s);
+}
+
+static uint8_t vfncvt_f32_to_e5m2_sat(uint32_t a, float_status *s)
+{
+    return float32_to_float8_e5m2(a, true, s);
+}
+
+/* vfwcvtbf16.f.f.w vd, vs2, vm # Convert OFP8 to BF16. */
+RVVCALL(OPFVV1, vfwcvtbf16_f_f_v_ofp8e4m3, WOP_UU_B, H2, H1,
+        float8_e4m3_to_bfloat16)
+RVVCALL(OPFVV1, vfwcvtbf16_f_f_v_ofp8e5m2, WOP_UU_B, H2, H1,
+        float8_e5m2_to_bfloat16)
+GEN_VEXT_V_ENV(vfwcvtbf16_f_f_v_ofp8e4m3, 2)
+GEN_VEXT_V_ENV(vfwcvtbf16_f_f_v_ofp8e5m2, 2)
+
+/* vfncvtbf16.f.f.w vd, vs2, vm # Convert BF16 to OFP8 without saturation. */
+RVVCALL(OPFVV1, vfncvtbf16_f_f_w_ofp8e4m3, NOP_UU_B, H1, H2,
+        vfncvt_bf16_to_e4m3)
+RVVCALL(OPFVV1, vfncvtbf16_f_f_w_ofp8e5m2, NOP_UU_B, H1, H2,
+        vfncvt_bf16_to_e5m2)
+GEN_VEXT_V_ENV(vfncvtbf16_f_f_w_ofp8e4m3, 1)
+GEN_VEXT_V_ENV(vfncvtbf16_f_f_w_ofp8e5m2, 1)
+
+/* vfncvtbf16.sat.f.f.w vd, vs2, vm # Convert BF16 to OFP8 with saturation. */
+RVVCALL(OPFVV1, vfncvtbf16_sat_f_f_w_ofp8e4m3, NOP_UU_B, H1, H2,
+        vfncvt_bf16_to_e4m3_sat)
+RVVCALL(OPFVV1, vfncvtbf16_sat_f_f_w_ofp8e5m2, NOP_UU_B, H1, H2,
+        vfncvt_bf16_to_e5m2_sat)
+GEN_VEXT_V_ENV(vfncvtbf16_sat_f_f_w_ofp8e4m3, 1)
+GEN_VEXT_V_ENV(vfncvtbf16_sat_f_f_w_ofp8e5m2, 1)
+
+/* Quad-width narrowing type for FP32 to OFP8 */
+#define QOP_UU_B uint8_t, uint32_t, uint32_t
+
+/* vfncvt.f.f.q vd, vs2, vm # Convert FP32 to OFP8. */
+RVVCALL(OPFVV1, vfncvt_f_f_q_ofp8e4m3, QOP_UU_B, H1, H4,
+        vfncvt_f32_to_e4m3)
+RVVCALL(OPFVV1, vfncvt_f_f_q_ofp8e5m2, QOP_UU_B, H1, H4,
+        vfncvt_f32_to_e5m2)
+GEN_VEXT_V_ENV(vfncvt_f_f_q_ofp8e4m3, 1)
+GEN_VEXT_V_ENV(vfncvt_f_f_q_ofp8e5m2, 1)
+
+/* vfncvt.sat.f.f.q vd, vs2, vm # Convert FP32 to OFP8 with saturation. */
+RVVCALL(OPFVV1, vfncvt_sat_f_f_q_ofp8e4m3, QOP_UU_B, H1, H4,
+        vfncvt_f32_to_e4m3_sat)
+RVVCALL(OPFVV1, vfncvt_sat_f_f_q_ofp8e5m2, QOP_UU_B, H1, H4,
+        vfncvt_f32_to_e5m2_sat)
+GEN_VEXT_V_ENV(vfncvt_sat_f_f_q_ofp8e4m3, 1)
+GEN_VEXT_V_ENV(vfncvt_sat_f_f_q_ofp8e5m2, 1)
+
+/*
  * Vector Reduction Operations
  */
 /* Vector Single-Width Integer Reduction Instructions */
