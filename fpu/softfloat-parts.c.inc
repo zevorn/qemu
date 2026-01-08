@@ -227,7 +227,8 @@ static void partsN(canonicalize)(FloatPartsN *p, float_status *status,
             p->exp = fmt->frac_shift - fmt->exp_bias
                    - shift + !has_pseudo_denormals;
         }
-    } else if (likely(p->exp < fmt->exp_max) || fmt->arm_althp) {
+    } else if (likely(p->exp < fmt->exp_max) || fmt->arm_althp ||
+               ocpfp_is_normal(p, fmt, false)) {
         p->cls = float_class_normal;
         p->exp -= fmt->exp_bias;
         frac_shl(p, fmt->frac_shift);
@@ -236,8 +237,12 @@ static void partsN(canonicalize)(FloatPartsN *p, float_status *status,
         p->cls = float_class_inf;
     } else {
         frac_shl(p, fmt->frac_shift);
-        p->cls = (parts_is_snan_frac(p->frac_hi, status)
-                  ? float_class_snan : float_class_qnan);
+        if (parts_is_snan_frac(p->frac_hi, status) == false ||
+            (fmt->ocpfp && status->ocp_fp8e5m2_no_signal_nan)) {
+            p->cls = float_class_qnan;
+        } else {
+            p->cls = float_class_snan;
+        }
     }
 }
 
@@ -313,8 +318,40 @@ static void partsN(uncanon_normal)(FloatPartsN *p, float_status *s,
             }
             p->frac_lo &= ~round_mask;
         }
+        p->exp = exp;
 
-        if (fmt->arm_althp) {
+        if (fmt->ocpfp) {
+            if (ocpfp_is_normal(p, fmt, true) == false) {
+                flags |= float_flag_overflow;
+                flags |= float_flag_inexact;
+                if (fmt->exp_size == 4) {
+                    if (fmt->ocpfp_sat || overflow_norm) {
+                        /* S.1111.110 */
+                        exp = exp_max;
+                        frac_clear(p);
+                        frac_addi(p, p, 0b110);
+                        frac_shl(p, frac_shift);
+                    } else {
+                        /* S.1111.111 NaN */
+                        p->cls = float_class_qnan;
+                        p->sign = (s->ocp_fp8_same_canonical_nan ? 0 : p->sign);
+                        exp = exp_max;
+                        frac_allones(p);
+                    }
+                } else if (fmt->exp_size == 5) {
+                    if (fmt->ocpfp_sat || overflow_norm) {
+                        /* S.11110.11 */
+                        exp = exp_max - 1;
+                        frac_allones(p);
+                    } else {
+                        /* S.11111.00 Inf */
+                        p->cls = float_class_inf;
+                        exp = exp_max;
+                        frac_clear(p);
+                    }
+                }
+            }
+        } else if (fmt->arm_althp) {
             /* ARM Alt HP eschews Inf and NaN for a wider exponent.  */
             if (unlikely(exp > exp_max)) {
                 /* Overflow.  Return the maximum normal.  */
@@ -435,8 +472,36 @@ static void partsN(uncanon)(FloatPartsN *p, float_status *s,
             return;
         case float_class_inf:
             g_assert(!fmt->arm_althp);
-            p->exp = fmt->exp_max;
-            frac_clear(p);
+            if (fmt->ocpfp) {
+                if (fmt->ocpfp_sat) {
+                    if (fmt->exp_size == 4) {
+                        /* S.1111.110 */
+                        p->exp = fmt->exp_max;
+                        frac_clear(p);
+                        frac_addi(p, p, 0x6);
+                    } else {
+                        /* S.11110.11 */
+                        p->exp = fmt->exp_max - 1;
+                        frac_allones(p);
+                    }
+                } else {
+                    if (fmt->exp_size == 4) {
+                        /* S.1111.111 NaN */
+                        p->cls = float_class_qnan;
+                        p->sign = (s->ocp_fp8_same_canonical_nan ? 0 : p->sign);
+                        p->exp = fmt->exp_max;
+                        frac_allones(p);
+                    } else {
+                        /* S.11111.00 Inf */
+                        p->cls = float_class_inf;
+                        p->exp = fmt->exp_max;
+                        frac_clear(p);
+                    }
+                }
+            } else {
+                p->exp = fmt->exp_max;
+                frac_clear(p);
+            }
             return;
         case float_class_qnan:
         case float_class_snan:
