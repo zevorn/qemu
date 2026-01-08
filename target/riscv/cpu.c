@@ -1387,6 +1387,9 @@ const RISCVCPUMultiExtConfig riscv_cpu_experimental_exts[] = {
     MULTI_EXT_CFG_BOOL("x-svukte", ext_svukte, false),
     MULTI_EXT_CFG_BOOL("x-zvfbfa", ext_zvfbfa, false),
 
+    /* Zvfofp8min extension for OFP8 conversion */
+    MULTI_EXT_CFG_BOOL("x-zvfofp8min", ext_zvfofp8min, false),
+
     { },
 };
 
