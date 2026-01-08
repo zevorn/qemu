@@ -544,6 +544,8 @@ typedef struct {
     int frac_shift;
     bool arm_althp;
     bool has_explicit_bit;
+    bool ocpfp;
+    bool ocpfp_sat;
     uint64_t round_mask;
 } FloatFmt;
 
@@ -559,6 +561,28 @@ typedef struct {
     .frac_size      = F,                                \
     .frac_shift     = (-F - 1) & 63,                    \
     .round_mask     = (1ull << ((-F - 1) & 63)) - 1
+
+static const FloatFmt float8_e4m3_params = {
+    FLOAT_PARAMS(4, 3),
+    .ocpfp = true
+};
+
+static const FloatFmt float8_e4m3_params_sat = {
+    FLOAT_PARAMS(4, 3),
+    .ocpfp = true,
+    .ocpfp_sat = true
+};
+
+static const FloatFmt float8_e5m2_params = {
+    FLOAT_PARAMS(5, 2),
+    .ocpfp = true
+};
+
+static const FloatFmt float8_e5m2_params_sat = {
+    FLOAT_PARAMS(5, 2),
+    .ocpfp = true,
+    .ocpfp_sat = true
+};
 
 static const FloatFmt float16_params = {
     FLOAT_PARAMS(5, 10)
@@ -612,6 +636,16 @@ static void unpack_raw64(FloatParts64 *r, const FloatFmt *fmt, uint64_t raw)
         .exp = extract64(raw, f_size, e_size),
         .frac = extract64(raw, 0, f_size)
     };
+}
+
+static void QEMU_FLATTEN float8_e4m3_unpack_raw(FloatParts64 *p, float8_e4m3 f)
+{
+    unpack_raw64(p, &float8_e4m3_params, f);
+}
+
+static void QEMU_FLATTEN float8_e5m2_unpack_raw(FloatParts64 *p, float8_e5m2 f)
+{
+    unpack_raw64(p, &float8_e5m2_params, f);
 }
 
 static void QEMU_FLATTEN float16_unpack_raw(FloatParts64 *p, float16 f)
@@ -669,6 +703,16 @@ static uint64_t pack_raw64(const FloatParts64 *p, const FloatFmt *fmt)
     ret = deposit64(ret, f_size, e_size, p->exp);
     ret = deposit64(ret, 0, f_size, p->frac);
     return ret;
+}
+
+static float8_e4m3 QEMU_FLATTEN float8_e4m3_pack_raw(const FloatParts64 *p)
+{
+    return make_float8_e4m3(pack_raw64(p, &float8_e4m3_params));
+}
+
+static float8_e5m2 QEMU_FLATTEN float8_e5m2_pack_raw(const FloatParts64 *p)
+{
+    return make_float8_e5m2(pack_raw64(p, &float8_e5m2_params));
 }
 
 static float16 QEMU_FLATTEN float16_pack_raw(const FloatParts64 *p)
@@ -1604,6 +1648,91 @@ static void frac128_widen(FloatParts256 *r, FloatParts128 *a)
 
 #define frac_widen(A, B)  FRAC_GENERIC_64_128(widen, B)(A, B)
 
+#define OCPFP_GENERIC_64_128(NAME, P) \
+    _Generic((P), FloatParts64 *: ocpfp64_##NAME, \
+                  FloatParts128 *: ocpfp128_##NAME)
+
+static bool ocpfp64_is_normal(const FloatParts64 *a, const FloatFmt *fmt,
+                              bool is_normalized)
+{
+    FloatParts64 input;
+    input.exp = a->exp;
+    input.frac = a->frac;
+    if (!is_normalized) {
+        frac64_shl(&input, fmt->frac_shift);
+        input.frac_hi |= DECOMPOSED_IMPLICIT_BIT;
+    }
+
+    if (fmt->ocpfp) {
+        if (fmt->exp_size == 4 && fmt->frac_size == 3) {
+            /*
+             * The OCP E4M3 format uses only two bit patterns for NaN (a
+             * single mantissa-exponent bit pattern with the sign bit) in
+             * order to increase emax to 8 and thus to increase the dynamic
+             * range by one binade.
+             */
+            FloatParts64 tmp;
+            frac64_clear(&tmp);
+            tmp.frac_lo = 0b110;
+            frac64_shl(&tmp, fmt->frac_shift);
+            tmp.frac_hi |= DECOMPOSED_IMPLICIT_BIT;
+            if (!(input.exp > fmt->exp_max ||
+                  (input.exp == fmt->exp_max &&
+                   frac64_cmp(&input, &tmp) == float_relation_greater))) {
+                return true;
+            }
+        } else if (fmt->exp_size == 5 && fmt->frac_size == 2) {
+            if (input.exp < fmt->exp_max) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool ocpfp128_is_normal(const FloatParts128 *a, const FloatFmt *fmt,
+                              bool is_normalized)
+{
+    FloatParts128 input;
+    input.exp = a->exp;
+    input.frac_hi = a->frac_hi;
+    input.frac_lo = a->frac_lo;
+    if (!is_normalized) {
+        frac128_shl(&input, fmt->frac_shift);
+        input.frac_hi |= DECOMPOSED_IMPLICIT_BIT;
+    }
+
+    if (fmt->ocpfp) {
+        if (fmt->exp_size == 4 && fmt->frac_size == 3) {
+            /*
+             * The OCP E4M3 format uses only two bit patterns for NaN (a
+             * single mantissa-exponent bit pattern with the sign bit) in
+             * order to increase emax to 8 and thus to increase the dynamic
+             * range by one binade.
+             */
+            FloatParts128 tmp;
+            frac128_clear(&tmp);
+            tmp.frac_lo = 0b110;
+            frac128_shl(&tmp, fmt->frac_shift);
+            tmp.frac_hi |= DECOMPOSED_IMPLICIT_BIT;
+            if (!(input.exp > fmt->exp_max ||
+                  (input.exp == fmt->exp_max &&
+                   frac128_cmp(&input, &tmp) == float_relation_greater))) {
+                return true;
+            }
+        } else if (fmt->exp_size == 5 && fmt->frac_size == 2) {
+            if (input.exp < fmt->exp_max) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+#define ocpfp_is_normal(A, F, N)  OCPFP_GENERIC_64_128(is_normal, A)(A, F, N)
+
 /*
  * Reciprocal sqrt table.  1 bit of exponent, 6-bits of mantessa.
  * From https://git.musl-libc.org/cgit/musl/tree/src/math/sqrt_data.c
@@ -1662,6 +1791,20 @@ static const uint16_t rsqrt_tab[128] = {
  * Pack/unpack routines with a specific FloatFmt.
  */
 
+static void float8_e4m3_unpack_canonical(FloatParts64 *p, float8_e4m3 f,
+                                         float_status *s)
+{
+    float8_e4m3_unpack_raw(p, f);
+    parts_canonicalize(p, s, &float8_e4m3_params);
+}
+
+static void float8_e5m2_unpack_canonical(FloatParts64 *p, float8_e5m2 f,
+                                         float_status *s)
+{
+    float8_e5m2_unpack_raw(p, f);
+    parts_canonicalize(p, s, &float8_e5m2_params);
+}
+
 static void float16a_unpack_canonical(FloatParts64 *p, float16 f,
                                       float_status *s, const FloatFmt *params)
 {
@@ -1680,6 +1823,22 @@ static void bfloat16_unpack_canonical(FloatParts64 *p, bfloat16 f,
 {
     bfloat16_unpack_raw(p, f);
     parts_canonicalize(p, s, &bfloat16_params);
+}
+
+static float8_e4m3 float8_e4m3_round_pack_canonical(FloatParts64 *p,
+                                                    float_status *status,
+                                                    const FloatFmt *params)
+{
+    parts_uncanon(p, status, params);
+    return float8_e4m3_pack_raw(p);
+}
+
+static float8_e5m2 float8_e5m2_round_pack_canonical(FloatParts64 *p,
+                                                    float_status *status,
+                                                    const FloatFmt *params)
+{
+    parts_uncanon(p, status, params);
+    return float8_e5m2_pack_raw(p);
 }
 
 static float16 float16a_round_pack_canonical(FloatParts64 *p,
@@ -2759,6 +2918,23 @@ static void parts_float_to_ahp(FloatParts64 *a, float_status *s)
     }
 }
 
+static void parts_float_to_ofp8(FloatParts64 *a, float_status *s,
+                                const FloatFmt *fmt)
+{
+    if (is_nan(a->cls)) {
+        if (s->ocp_fp8_same_canonical_nan) {
+            if (a->cls == float_class_snan) {
+                float_raise(float_flag_invalid | float_flag_invalid_snan, s);
+            }
+            a->sign = 0;
+            a->exp = fmt->exp_max;
+            frac_allones(a);
+        } else {
+            parts_return_nan(a, s);
+        }
+    }
+}
+
 static void parts64_float_to_float(FloatParts64 *a, float_status *s)
 {
     if (is_nan(a->cls)) {
@@ -2821,6 +2997,71 @@ static void parts_float_to_float_widen(FloatParts128 *a, FloatParts64 *b,
     if (a->cls == float_class_denormal) {
         float_raise(float_flag_input_denormal_used, s);
     }
+}
+
+
+bfloat16 float8_e4m3_to_bfloat16(float8_e4m3 a, float_status *s)
+{
+    FloatParts64 p;
+
+    float8_e4m3_unpack_canonical(&p, a, s);
+    parts_float_to_float(&p, s);
+
+    return bfloat16_round_pack_canonical(&p, s);
+}
+
+bfloat16 float8_e5m2_to_bfloat16(float8_e5m2 a, float_status *s)
+{
+    FloatParts64 p;
+
+    float8_e5m2_unpack_canonical(&p, a, s);
+    parts_float_to_float(&p, s);
+
+    return bfloat16_round_pack_canonical(&p, s);
+}
+
+float8_e4m3 bfloat16_to_float8_e4m3(bfloat16 a, bool saturate, float_status *s)
+{
+    const FloatFmt *fmt = saturate ? &float8_e4m3_params_sat
+                                   : &float8_e4m3_params;
+    FloatParts64 p;
+
+    bfloat16_unpack_canonical(&p, a, s);
+    parts_float_to_ofp8(&p, s, fmt);
+    return float8_e4m3_round_pack_canonical(&p, s, fmt);
+}
+
+float8_e5m2 bfloat16_to_float8_e5m2(bfloat16 a, bool saturate, float_status *s)
+{
+    const FloatFmt *fmt = saturate ? &float8_e5m2_params_sat
+                                   : &float8_e5m2_params;
+    FloatParts64 p;
+
+    bfloat16_unpack_canonical(&p, a, s);
+    parts_float_to_ofp8(&p, s, fmt);
+    return float8_e5m2_round_pack_canonical(&p, s, fmt);
+}
+
+float8_e4m3 float32_to_float8_e4m3(float32 a, bool saturate, float_status *s)
+{
+    const FloatFmt *fmt = saturate ? &float8_e4m3_params_sat
+                                   : &float8_e4m3_params;
+    FloatParts64 p;
+
+    float32_unpack_canonical(&p, a, s);
+    parts_float_to_ofp8(&p, s, fmt);
+    return float8_e4m3_round_pack_canonical(&p, s, fmt);
+}
+
+float8_e5m2 float32_to_float8_e5m2(float32 a, bool saturate, float_status *s)
+{
+    const FloatFmt *fmt = saturate ? &float8_e5m2_params_sat
+                                   : &float8_e5m2_params;
+    FloatParts64 p;
+
+    float32_unpack_canonical(&p, a, s);
+    parts_float_to_ofp8(&p, s, fmt);
+    return float8_e5m2_round_pack_canonical(&p, s, fmt);
 }
 
 float32 float16_to_float32(float16 a, bool ieee, float_status *s)
