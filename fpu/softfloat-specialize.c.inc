@@ -227,6 +227,30 @@ floatx80 floatx80_default_inf(bool zSign, float_status *status)
 }
 
 /*----------------------------------------------------------------------------
+| Returns 1 if the OCP(Open Compute Platform) FP8 value `a' is a quiet NaN;
+| otherwise returns 0.
+*----------------------------------------------------------------------------*/
+
+bool float8_e4m3_is_quiet_nan(float8_e4m3 a_, float_status *status)
+{
+    return float8_e4m3_is_any_nan(a_);
+}
+
+bool float8_e5m2_is_quiet_nan(float8_e5m2 a_, float_status *status)
+{
+    if (no_signaling_nans(status) || status->ocp_fp8e5m2_no_signal_nan) {
+        return float8_e5m2_is_any_nan(a_);
+    } else {
+        uint8_t a = float8_e5m2_val(a_);
+        if (snan_bit_is_one(status)) {
+            return (((a >> 1) & 0x3F) == 0x3E) && (a & 0x1);
+        } else {
+            return ((a >> 1) & 0x3F) == 0x3F;
+        }
+    }
+}
+
+/*----------------------------------------------------------------------------
 | Returns 1 if the half-precision floating-point value `a' is a quiet
 | NaN; otherwise returns 0.
 *----------------------------------------------------------------------------*/
@@ -240,7 +264,6 @@ bool float16_is_quiet_nan(float16 a_, float_status *status)
         if (snan_bit_is_one(status)) {
             return (((a >> 9) & 0x3F) == 0x3E) && (a & 0x1FF);
         } else {
-
             return ((a >> 9) & 0x3F) == 0x3F;
         }
     }
@@ -261,6 +284,38 @@ bool bfloat16_is_quiet_nan(bfloat16 a_, float_status *status)
             return (((a >> 6) & 0x1FF) == 0x1FE) && (a & 0x3F);
         } else {
             return ((a >> 6) & 0x1FF) == 0x1FF;
+        }
+    }
+}
+
+/*----------------------------------------------------------------------------
+| Returns 1 if the OCP(Open Compute Platform) FP8 value `a' is a signaling NaN;
+| otherwise returns 0.
+*----------------------------------------------------------------------------*/
+
+bool float8_e4m3_is_signaling_nan(float8_e4m3 a_, float_status *status)
+{
+    if (no_signaling_nans(status)) {
+        return false;
+    } else {
+        if (snan_bit_is_one(status)) {
+            return float8_e4m3_is_any_nan(a_);
+        } else {
+            return false;
+        }
+    }
+}
+
+bool float8_e5m2_is_signaling_nan(float8_e5m2 a_, float_status *status)
+{
+    if (no_signaling_nans(status)) {
+        return false;
+    } else {
+        uint8_t a = float8_e5m2_val(a_);
+        if (snan_bit_is_one(status)) {
+            return ((a >> 1) & 0x3F) == 0x3F;
+        } else {
+            return (((a >> 1) & 0x3F) == 0x3E && (a & 0x1));
         }
     }
 }

@@ -136,6 +136,26 @@ static inline void set_no_signaling_nans(bool val, float_status *status)
     status->no_signaling_nans = val;
 }
 
+static inline void set_ocp_fp8e5m2_no_signal_nan(bool val, float_status *status)
+{
+    status->ocp_fp8e5m2_no_signal_nan = val;
+}
+
+static inline bool get_ocp_fp8e5m2_no_signal_nan(const float_status *status)
+{
+    return status->ocp_fp8e5m2_no_signal_nan;
+}
+
+static inline void set_ocp_fp8_same_canonical_nan(bool val, float_status *status)
+{
+    status->ocp_fp8_same_canonical_nan = val;
+}
+
+static inline bool get_ocp_fp8_same_canonical_nan(const float_status *status)
+{
+    return status->ocp_fp8_same_canonical_nan;
+}
+
 static inline bool get_float_detect_tininess(const float_status *status)
 {
     return status->tininess_before_rounding;

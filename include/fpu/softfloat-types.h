@@ -120,6 +120,18 @@ typedef struct {
 typedef uint16_t bfloat16;
 
 /*
+ * Software OCP(Open Compute Project) 8-bit floating point types
+ */
+typedef uint8_t float8_e4m3;
+typedef uint8_t float8_e5m2;
+#define float8_e4m3_val(x) (x)
+#define float8_e5m2_val(x) (x)
+#define make_float8_e4m3(x) (x)
+#define make_float8_e5m2(x) (x)
+#define const_float8_e4m3(x) (x)
+#define const_float8_e5m2(x) (x)
+
+/*
  * Software IEC/IEEE floating-point underflow tininess-detection mode.
  */
 
@@ -410,6 +422,17 @@ typedef struct float_status {
      */
     bool snan_bit_is_one;
     bool no_signaling_nans;
+    /*
+     * When true, OCP FP8 E5M2 format does not generate signaling NaNs.
+     * RISC-V uses only quiet NaNs in its OCP FP8 implementation.
+     */
+    bool ocp_fp8e5m2_no_signal_nan;
+    /*
+     * When true, OCP FP8 formats use the same canonical NaN representation
+     * (0x7F) for all NaN outputs. RISC-V specifies a single canonical NaN
+     * for both E4M3 and E5M2.
+     */
+    bool ocp_fp8_same_canonical_nan;
     /* should overflowed results subtract re_bias to its exponent? */
     bool rebias_overflow;
     /* should underflowed results add re_bias to its exponent? */
