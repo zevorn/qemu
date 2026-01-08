@@ -200,6 +200,8 @@ float8_e5m2 bfloat16_to_float8_e5m2(bfloat16, bool saturate, float_status *statu
 float8_e4m3 float32_to_float8_e4m3(float32, bool saturate, float_status *status);
 float8_e5m2 float32_to_float8_e5m2(float32, bool saturate, float_status *status);
 
+float8_e4m3 float4_e2m1_to_float8_e4m3(float4_e2m1, float_status *status);
+
 /*----------------------------------------------------------------------------
 | Software OCP FP operations.
 *----------------------------------------------------------------------------*/
