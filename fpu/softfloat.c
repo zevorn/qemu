@@ -562,6 +562,11 @@ typedef struct {
     .frac_shift     = (-F - 1) & 63,                    \
     .round_mask     = (1ull << ((-F - 1) & 63)) - 1
 
+static const FloatFmt float4_e2m1_params = {
+    FLOAT_PARAMS(2, 1),
+    .ocpfp = true
+};
+
 static const FloatFmt float8_e4m3_params = {
     FLOAT_PARAMS(4, 3),
     .ocpfp = true
@@ -636,6 +641,11 @@ static void unpack_raw64(FloatParts64 *r, const FloatFmt *fmt, uint64_t raw)
         .exp = extract64(raw, f_size, e_size),
         .frac = extract64(raw, 0, f_size)
     };
+}
+
+static void QEMU_FLATTEN float4_e2m1_unpack_raw(FloatParts64 *p, float4_e2m1 f)
+{
+    unpack_raw64(p, &float4_e2m1_params, f);
 }
 
 static void QEMU_FLATTEN float8_e4m3_unpack_raw(FloatParts64 *p, float8_e4m3 f)
@@ -1664,7 +1674,11 @@ static bool ocpfp64_is_normal(const FloatParts64 *a, const FloatFmt *fmt,
     }
 
     if (fmt->ocpfp) {
-        if (fmt->exp_size == 4 && fmt->frac_size == 3) {
+        if (fmt->exp_size == 2 && fmt->frac_size == 1) {
+            if (input.exp <= fmt->exp_max) {
+                return true;
+            }
+        } else if (fmt->exp_size == 4 && fmt->frac_size == 3) {
             /*
              * The OCP E4M3 format uses only two bit patterns for NaN (a
              * single mantissa-exponent bit pattern with the sign bit) in
@@ -1704,7 +1718,11 @@ static bool ocpfp128_is_normal(const FloatParts128 *a, const FloatFmt *fmt,
     }
 
     if (fmt->ocpfp) {
-        if (fmt->exp_size == 4 && fmt->frac_size == 3) {
+        if (fmt->exp_size == 2 && fmt->frac_size == 1) {
+            if (input.exp <= fmt->exp_max) {
+                return true;
+            }
+        } else if (fmt->exp_size == 4 && fmt->frac_size == 3) {
             /*
              * The OCP E4M3 format uses only two bit patterns for NaN (a
              * single mantissa-exponent bit pattern with the sign bit) in
@@ -1790,6 +1808,13 @@ static const uint16_t rsqrt_tab[128] = {
 /*
  * Pack/unpack routines with a specific FloatFmt.
  */
+
+static void float4_e2m1_unpack_canonical(FloatParts64 *p, float4_e2m1 f,
+                                       float_status *s)
+{
+    float4_e2m1_unpack_raw(p, f);
+    parts_canonicalize(p, s, &float4_e2m1_params);
+}
 
 static void float8_e4m3_unpack_canonical(FloatParts64 *p, float8_e4m3 f,
                                          float_status *s)
@@ -2999,6 +3024,14 @@ static void parts_float_to_float_widen(FloatParts128 *a, FloatParts64 *b,
     }
 }
 
+float8_e4m3 float4_e2m1_to_float8_e4m3(float4_e2m1 a, float_status *s)
+{
+    FloatParts64 p;
+
+    float4_e2m1_unpack_canonical(&p, a, s);
+    parts_float_to_ofp8(&p, s, &float8_e4m3_params);
+    return float8_e4m3_round_pack_canonical(&p, s, &float8_e4m3_params);
+}
 
 bfloat16 float8_e4m3_to_bfloat16(float8_e4m3 a, float_status *s)
 {
