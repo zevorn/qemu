@@ -1,0 +1,470 @@
+on: push
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkapply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # to debug container live from GitHub
+      # - uses: mxschmitt/action-tmate@v3
+      - run: bash -c '[ ! -f shazam.log ] || { cat shazam.log; exit 1; }'
+
+  checkpatch-ignore-signoff:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch -a origin --unshallow || true
+      - run: git remote add upstream -f https://gitlab.com/qemu-project/qemu
+      - run: ./scripts/checkpatch.pl --no-signoff $(git merge-base upstream/master HEAD)..HEAD
+
+  checkpatch-with-signoff:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch -a origin --unshallow || true
+      - run: git remote add upstream -f https://gitlab.com/qemu-project/qemu
+      - run: ./scripts/checkpatch.pl $(git merge-base upstream/master HEAD)..HEAD
+
+  # use docker-run to not rebuild images
+  # images are built daily and pushed on pbolinaro/qemu-ci:*
+  build-cross:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        container: [alpine,centos9,debian-amd64-cross,debian-arm64-cross,debian-hexagon-cross,debian-legacy-test-cross,debian-loongarch-cross,debian-mips64el-cross,debian-ppc64el-cross,debian-riscv64-cross,debian-tricore-cross,fedora,opensuse-leap,ubuntu2204]
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install meson
+      # - run: make docker-run J=$(nproc) RUNC=podman TEST=test-build IMAGE=docker.io/pbolinaro/qemu-ci:${{matrix.container}}
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd)
+          -w $(pwd)/tests/docker/
+          docker.io/pbolinaro/qemu-ci:${{matrix.container}}
+          env QEMU_SRC=$(pwd) ENABLE_RUST=0 INSTALL_DIR=/ BUILD_DIR=/tmp MAKEFLAGS="-j $(nproc)"
+          ./test-build
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    needs: checkapply
+    runs-on: ${{matrix.image}}
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure && ninja -C build install'
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          ./build/qemu-system-x86_64 -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          ./build/qemu-${{matrix.arch}} -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000  -plugin ./build/tests/tcg/plugins/libinsn -d plugin ./build/qemu-system-x86_64 --version
+
+  build-cross-mingw64:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:fedora-win64-cross
+          bash -cx './configure $QEMU_CONFIGURE_OPTS && ninja -C build install'
+
+  build-windows:
+    needs: checkapply
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sys: UCRT64
+            image: windows-2025
+            arch: x64
+          - sys: CLANG64
+            image: windows-2025
+            arch: x64
+          - sys: MINGW64
+            image: windows-2025
+            arch: x64
+          - sys: CLANGARM64
+            image: windows-11-arm
+            arch: arm64
+    runs-on: ${{matrix.image}}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: ${{matrix.sys}}
+      - run: pacman -Syu --noconfirm || true
+      - uses: actions/checkout@v4
+      - run: >
+          pacman -S --noconfirm base-devel binutils bison curl diffutils flex git grep make sed
+          ${MINGW_PACKAGE_PREFIX}-toolchain
+          ${MINGW_PACKAGE_PREFIX}-glib2
+          ${MINGW_PACKAGE_PREFIX}-gtk3
+          ${MINGW_PACKAGE_PREFIX}-libnfs
+          ${MINGW_PACKAGE_PREFIX}-libssh
+          ${MINGW_PACKAGE_PREFIX}-ninja
+          ${MINGW_PACKAGE_PREFIX}-pixman
+          ${MINGW_PACKAGE_PREFIX}-pkgconf
+          ${MINGW_PACKAGE_PREFIX}-python
+          ${MINGW_PACKAGE_PREFIX}-SDL2
+          ${MINGW_PACKAGE_PREFIX}-zstd
+      # Install all dependencies for windows build
+      - run: git clone https://github.com/msys2/MINGW-packages --depth=1
+      - run: pushd ./MINGW-packages/mingw-w64-qemu && (makepkg --syncdeps --nobuild --noprepare --noconfirm --skippgpcheck PKGBUILD || true) && popd
+      # Install debug tools (gflags, cdb), included in wdk:
+      - run: /c/ProgramData/Chocolatey/bin/choco install -y windowsdriverkit11
+      - run: ./configure --disable-docs && ninja -C build
+      # detect dll issue by loading qemu binary with cdb (run + quit)
+      # enable verbose load debug with gflags
+      # https://ten0s.github.io/blog/2022/07/01/debugging-dll-loading-errors
+      - run: /c/Program\ Files\ \(x86\)/Windows\ Kits/10/Debuggers/${{matrix.arch}}/gflags.exe -i qemu-system-x86_64.exe +sls
+      - run: /c/Program\ Files\ \(x86\)/Windows\ Kits/10/Debuggers/${{matrix.arch}}/cdb.exe -c 'g;q' ./build/qemu-system-x86_64.exe --version || true
+      - run: ./build/qemu-system-x86_64.exe -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+
+
+  build-macos:
+    needs: checkapply
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: macos-15-intel
+          - arch: aarch64
+            image: macos-26
+    runs-on: ${{matrix.image}}
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew uninstall cmake # conflict with install command below
+      - run: brew install --quiet $(brew deps --include-build qemu)
+      - run: ./configure && ninja -C build
+      - run: ./build/qemu-system-x86_64-unsigned -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+
+  build-freebsd:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # To reproduce locally:
+      #
+      # download vm:
+      # $ wget https://github.com/vmactions/freebsd-builder/releases/download/v1.0.7/freebsd-14.2-host.id_rsa
+      # $ chmod 0600 freebsd-14.2-host.id_rsa
+      # $ wget https://github.com/vmactions/freebsd-builder/releases/download/v1.0.7/freebsd-14.2.qcow2.zst
+      # $ zstd --decompress freebsd-14.2.qcow2.zst
+      #
+      # run vm:
+      # $ qemu-system-x86_64 -enable-kvm -m 16G -smp $(nproc) -net user,hostfwd=tcp::2222-:22 -net nic -nographic freebsd-14.2.qcow2
+      # # eventually, boot in serial mode (press 5 until "Cons: Serial", then press enter)
+      #
+      # connect to vm:
+      # $ ssh -i freebsd-14.2-host.id_rsa root@localhost -o StrictHostKeyChecking=no -p 2222
+      #
+      # copy local source code from QEMU tree:
+      # $ rsync -av --exclude build/ --exclude 'freebsd-*' -e 'ssh -i freebsd-14.2-host.id_rsa -o StrictHostKeyChecking=no -p 2222' root@localhost:qemu/
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          copyback: false
+          sync: no
+          release: "14.3"
+      - run: rsync -av ./ freebsd:./qemu/
+      - shell: freebsd {0}
+        run: pkg update && pkg install -y git gcc gmake python pkgconf pixman bison glib ninja
+      - shell: freebsd {0}
+        run: cd qemu && ./configure && ninja -C build
+      - shell: freebsd {0}
+        run: cd qemu && ./build/qemu-system-x86_64 -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+      - shell: freebsd {0}
+        run: cd qemu && ./build/qemu-x86_64 -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000  -plugin ./build/tests/tcg/plugins/libinsn -d plugin ./build/qemu-system-x86_64 --version
+
+  build-netbsd:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # To reproduce locally:
+      #
+      # download vm:
+      # $ wget https://github.com/vmactions/netbsd-builder/releases/download/v1.0.6/netbsd-10.0-host.id_rsa
+      # $ chmod 0600 netbsd-10.0-host.id_rsa
+      # $ wget https://github.com/vmactions/netbsd-builder/releases/download/v1.0.6/netbsd-10.0.qcow2.zst
+      # $ zstd --decompress netbsd-10.0.qcow2.zst
+      #
+      # run vm:
+      # $ qemu-system-x86_64 -enable-kvm -m 16G -smp $(nproc) -net user,hostfwd=tcp::2222-:22 -net nic -nographic netbsd-10.0.qcow2
+      #
+      # connect to vm:
+      # $ ssh -i netbsd-10.0-host.id_rsa root@localhost -o StrictHostKeyChecking=no -p 2222
+      #
+      # copy local source code from QEMU tree:
+      # $ rsync -av --exclude build/ --exclude 'netbsd-*' -e 'ssh -i netbsd-10.0-host.id_rsa -o StrictHostKeyChecking=no-p 2222' root@localhost:qemu/
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          copyback: false
+          sync: no
+          release: "10.0"
+      - run: rsync -av ./ netbsd:./qemu/
+      - shell: netbsd {0}
+        run: pkg_add pkgin && pkgin -y install git gmake python314 pkgconf pixman bison glib ninja-build && ln -s /usr/pkg/bin/python3.14 /usr/bin/python3
+      - shell: netbsd {0}
+        run: cd qemu && ./configure && ninja -C build
+      # https://gitlab.com/qemu-project/qemu/-/issues/2685
+      - shell: netbsd {0}
+        run: paxctl +m qemu/build/qemu-system-x86_64
+      - shell: netbsd {0}
+        run: cd qemu && ./build/qemu-system-x86_64 -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+
+  build-misc:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-user --disable-system --enable-docs --enable-tools && ninja -C build install'
+
+  build-big-endian:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian-s390x-cross
+          bash -cx './configure $QEMU_CONFIGURE_OPTS && ninja -C build install'
+
+  build-debug:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --enable-debug --enable-modules && ninja -C build install'
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          ./build/qemu-system-x86_64 -nographic -plugin ./build/contrib/plugins/libstoptrigger,icount=1000000 -plugin ./build/tests/tcg/plugins/libinsn -d plugin
+
+  build-static:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-system --disable-tools --disable-guest-agent --disable-docs --static && ninja -C build install'
+
+  build-tsan:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --enable-tsan && ninja -C build install'
+
+  build-clang:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --cxx=clang++ --cc=clang --host-cc=clang --enable-debug && ninja -C build install'
+
+  build-clang-latest:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx 'LLVM_VERSION=20 && apt update && apt install -y lsb-release wget gnupg && wget https://apt.llvm.org/llvm.sh && bash llvm.sh ${LLVM_VERSION} && ./configure --cxx=clang++-${LLVM_VERSION} --cc=clang-${LLVM_VERSION} --host-cc=clang-${LLVM_VERSION} --enable-debug && ninja -C build install'
+
+  build-disable-tcg:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-tcg && ninja -C build install'
+
+  build-disable-kvm:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-kvm && ninja -C build install'
+
+  build-disable-tcg-kvm-for-xen:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-tcg --disable-kvm && ninja -C build install'
+
+  build-minimal:
+    needs: checkapply
+    runs-on: ubuntu-24.04
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --without-default-features --without-default-devices --disable-kvm --disable-tcg && ninja -C build install'
+
+  check-tcg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    needs: checkapply
+    runs-on: ${{matrix.image}}
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-docs --enable-debug-tcg --enable-debug-graph-lock --enable-debug-mutex && ninja -C build'
+      - run: >
+          podman run --pull newer --init --privileged --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx "make -k -j $(nproc) check-tcg || make -j1 check-tcg V=1"
+
+  # run all meson tests, except functional.
+  # block tests are not ran because they don't support sanitizers:
+  # https://gitlab.com/qemu-project/qemu/-/blob/master/tests/qemu-iotests/meson.build
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    needs: checkapply
+    runs-on: ${{matrix.image}}
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      # we use image with download cache filled. Solves servers flakiness.
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-docs --enable-debug-tcg --enable-debug-graph-lock --enable-debug-mutex && ninja -C build'
+      - run: bash -c "[ -e /dev/kvm ] && sudo chown $USER:$USER /dev/kvm || true"
+      # run podman without -t to avoid interactive output of meson test
+      - run: >
+          podman run --pull newer --init --privileged --rm -i $([ -e /dev/kvm ] && echo '-v /dev/kvm:/dev/kvm') -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx "./build/pyvenv/bin/meson test -C build --setup thorough --no-suite func-quick --no-suite func-thorough -t 5 --print-errorlogs"
+
+  check-functional:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    needs: checkapply
+    runs-on: ${{matrix.image}}
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      # we use image with download cache filled. Solves servers flakiness.
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-docs --enable-debug-tcg --enable-debug-graph-lock --enable-debug-mutex && ninja -C build'
+      - run: bash -c "[ -e /dev/kvm ] && sudo chown $USER:$USER /dev/kvm || true"
+      # run podman without -t to avoid interactive output of meson test
+      - run: >
+          podman run --pull newer --init --privileged --rm -i $([ -e /dev/kvm ] && echo '-v /dev/kvm:/dev/kvm') -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx "./build/pyvenv/bin/meson test -C build --setup thorough --suite func-quick --suite func-thorough -j $(($(nproc) / 2)) -t 2 --print-errorlogs --wrapper $(pwd)/scripts/run-functional-test.sh --max-lines=0"
+          # Should solve issues with flaky tests.
+          # Limit parallelism because it creates timeout.
+
+  # iotests do not support sanitizers, so we run them in their own job
+  check-block:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    needs: checkapply
+    runs-on: ${{matrix.image}}
+    steps:
+      - run: sudo rm -rf /opt/ /usr/local/.ghcup /usr/local/lib/android
+      - uses: actions/checkout@v4
+      # we use image with download cache filled. Solves servers flakiness.
+      - run: >
+          podman run --pull newer --init --rm -it -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx './configure --disable-docs --enable-debug-tcg --enable-debug-graph-lock --enable-debug-mutex && ninja -C build'
+      - run: bash -c "[ -e /dev/kvm ] && sudo chown $USER:$USER /dev/kvm || true"
+      # run podman without -t to avoid interactive output of meson test
+      - run: >
+          podman run --pull newer --init --privileged --rm -i $([ -e /dev/kvm ] && echo '-v /dev/kvm:/dev/kvm') -v $(pwd):$(pwd) -w $(pwd)
+          docker.io/pbolinaro/qemu-ci:debian
+          bash -cx "./build/pyvenv/bin/meson test -C build --setup thorough --suite block --suite block-slow --suite block-thorough -t 5 --print-errorlogs"
