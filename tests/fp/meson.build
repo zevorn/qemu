@@ -155,3 +155,14 @@ fptestlog2 = executable(
 test('fp-test-log2', fptestlog2,
      timeout: slow_fp_tests.get('log2', 30),
      suite: ['softfloat', 'softfloat-ops'])
+
+# OCP FP8/FP4 and BFloat16 tests
+fptestocp = executable(
+  'fp-test-ocp',
+  ['fp-test-ocp.c', '../../fpu/softfloat.c'],
+  dependencies: [qemuutil, libsoftfloat],
+  c_args: fpcflags,
+)
+test('fp-test-ocp', fptestocp,
+     timeout: 30,
+     suite: ['softfloat', 'softfloat-ocp'])
