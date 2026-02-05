@@ -512,23 +512,32 @@ static void partsN(uncanon_sat)(FloatPartsN *p, float_status *s,
         case float_class_inf:
             /*
              * Unified infinity handling using format capabilities.
-             * Formats with no_infinity must convert infinity to something else
+             * Formats with no_infinity must convert infinity to something else.
+             * With saturation, even formats with infinity produce max normal.
              */
-            if (!fmt->no_infinity) {
+            if (!fmt->no_infinity && !saturate) {
                 p->exp = fmt->exp_max;
                 frac_clear(p);
+            } else if (!fmt->no_infinity && saturate) {
+                /* Saturate infinity to max normal for IEEE-like formats */
+                p->exp = fmt->exp_max - 1;
+                frac_allones(p);
+                frac_shr(p, fmt->frac_shift);
             } else if (fmt_has_nan_encoding(fmt)) {
                 if (saturate) {
                     parts_set_max_normal(p, fmt);
+                    frac_shr(p, fmt->frac_shift);
                 } else {
                     uint8_t dnan = s->default_nan_pattern;
                     p->cls = float_class_qnan;
                     p->sign = dnan >> 7;
                     p->exp = fmt->exp_max;
                     frac_allones(p);
+                    frac_shr(p, fmt->frac_shift);
                 }
             } else {
                 parts_set_max_normal(p, fmt);
+                frac_shr(p, fmt->frac_shift);
             }
             return;
         case float_class_qnan:
