@@ -837,6 +837,11 @@ bool riscv_itrigger_enabled(CPURISCVState *env)
 void helper_itrigger_match(CPURISCVState *env)
 {
     int count;
+
+    if (env->debug_mode) {
+        return;
+    }
+
     for (int i = 0; i < RV_MAX_TRIGGERS; i++) {
         if (get_trigger_type(env, i) != TRIGGER_TYPE_INST_CNT) {
             continue;
@@ -848,7 +853,9 @@ void helper_itrigger_match(CPURISCVState *env)
         if (!count) {
             continue;
         }
-        itrigger_set_count(env, i, count--);
+
+        count--;
+        itrigger_set_count(env, i, count);
         if (!count) {
             env->itrigger_enabled = riscv_itrigger_enabled(env);
             do_trigger_action(env, i);
