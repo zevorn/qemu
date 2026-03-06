@@ -481,9 +481,11 @@ struct CPUArchState {
     target_ulong dpc;
     target_ulong dscratch[2];
 
-    /* Pending Debug Module halt request from the board-level controller. */
+    /* DM halt request (set by external Debug Module GPIO) */
     bool dm_halt_request;
     uint8_t dm_halt_cause;
+    bool dm_rom_present;
+    uint64_t dm_halt_addr;
 
     uint64_t mstateen[SMSTATEEN_MAX_COUNT];
     uint64_t hstateen[SMSTATEEN_MAX_COUNT];

@@ -141,6 +141,24 @@ static bool riscv_sdext_enabled(CPURISCVState *env)
 {
     return riscv_cpu_cfg(env)->ext_sdext;
 }
+
+/*
+ * Debug Spec v1.0 Table 9:
+ * - ebreak: dpc = address of the ebreak instruction.
+ * - step/trigger/haltreq (and reset/group/other): dpc = next instruction
+ *   to execute when Debug Mode was entered.
+ */
+static target_ulong riscv_debug_dpc_on_entry(CPURISCVState *env,
+                                             target_ulong trap_pc,
+                                             uint32_t cause)
+{
+    switch (cause & 0x7) {
+    case DCSR_CAUSE_EBREAK:
+        return trap_pc & get_xepc_mask(env);
+    default:
+        return env->pc & get_xepc_mask(env);
+    }
+}
 #endif
 
 void riscv_cpu_enter_debug_mode(CPURISCVState *env, target_ulong pc,
@@ -152,7 +170,7 @@ void riscv_cpu_enter_debug_mode(CPURISCVState *env, target_ulong pc,
     }
 
     env->debug_mode = true;
-    env->dpc = pc & get_xepc_mask(env);
+    env->dpc = riscv_debug_dpc_on_entry(env, pc, cause);
     env->dcsr &= ~(DCSR_CAUSE_MASK | DCSR_PRV_MASK | DCSR_V);
     env->dcsr |= ((target_ulong)(cause & 0x7)) << DCSR_CAUSE_SHIFT;
     env->dcsr |= env->priv & DCSR_PRV_MASK;
@@ -168,6 +186,13 @@ void riscv_cpu_enter_debug_mode(CPURISCVState *env, target_ulong pc,
         }
         env->elp = false;
     }
+
+    /*
+     * Per RISC-V Debug Spec v1.0 Section 4.1:
+     * "All operations are executed with machine mode privilege."
+     * Switch to M-mode so ROM/progbuf fetches use physical addressing.
+     */
+    riscv_cpu_set_mode(env, PRV_M, false);
 #endif
 }
 

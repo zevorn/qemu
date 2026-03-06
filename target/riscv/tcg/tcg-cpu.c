@@ -280,6 +280,16 @@ static void riscv_cpu_exec_enter(CPUState *cs)
     if (!cpu->cfg.ext_sdext || !env->debug_mode) {
         return;
     }
+
+    /*
+     * When a DM ROM is present, the CPU must stay in debug mode and
+     * execute ROM code. DRET will leave debug mode later. Without a DM
+     * ROM, leave debug mode immediately (legacy shortcut).
+     */
+    if (env->dm_rom_present) {
+        return;
+    }
+
     target_ulong pc = env->dpc;
     riscv_cpu_leave_debug_mode(env);
     env->pc = pc;
