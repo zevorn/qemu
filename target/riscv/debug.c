@@ -298,9 +298,20 @@ static void do_trigger_action(CPURISCVState *env, target_ulong trigger_index)
             riscv_raise_exception(env, RISCV_EXCP_BREAKPOINT, 0);
         }
         riscv_cpu_enter_debug_mode(env, env->pc, DCSR_CAUSE_TRIGGER);
+        if (env->dm_rom_present) {
+            /*
+             * DM ROM present: redirect to ROM entry and restart the exec
+             * loop. Clear exception_index so EXCP_DEBUG does not propagate
+             * to the MTTCG layer as a spurious GDB stop event.
+             */
+            env->pc = env->dm_halt_addr;
+            cs->exception_index = -1;
+            cpu_loop_exit(cs);
+        }
         /*
-         * If this came from the Trigger Module's CPU breakpoint/watchpoint,
-         * we're already returning via EXCP_DEBUG. Otherwise, stop now.
+         * No DM ROM (gdbstub path): let EXCP_DEBUG propagate so the gdb
+         * stub stops the CPU. riscv_cpu_exec_enter leaves debug mode via
+         * the legacy shortcut on next exec entry.
          */
         if (cs->exception_index != EXCP_DEBUG) {
             cs->exception_index = EXCP_DEBUG;
