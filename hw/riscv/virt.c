@@ -58,6 +58,7 @@
 #include "qapi/qapi-visit-common.h"
 #include "hw/virtio/virtio-iommu.h"
 #include "hw/uefi/var-service-api.h"
+#include "hw/riscv/dm.h"
 
 /* KVM AIA only supports APLIC MSI. APLIC Wired is always emulated by QEMU. */
 static bool virt_use_kvm_aia_aplic_imsic(RISCVVirtAIAType aia_type)
@@ -80,7 +81,7 @@ static bool virt_aclint_allowed(void)
 }
 
 static const MemMapEntry virt_memmap[] = {
-    [VIRT_DEBUG] =        {        0x0,         0x100 },
+    [VIRT_DEBUG] =        {        0x0, RISCV_DM_SIZE },
     [VIRT_MROM] =         {     0x1000,        0xf000 },
     [VIRT_TEST] =         {   0x100000,        0x1000 },
     [VIRT_RTC] =          {   0x101000,        0x1000 },
@@ -1701,6 +1702,24 @@ static void virt_machine_init(MachineState *machine)
     gpex_pcie_init(system_memory, pcie_irqchip, s);
 
     create_platform_bus(s, mmio_irqchip);
+
+    /* Create Debug Module and connect each hart's halt-request IRQ */
+    int total_harts = machine->smp.cpus;
+    DeviceState *dm = riscv_dm_create(system_memory,
+                                      s->memmap[VIRT_DEBUG].base,
+                                      total_harts);
+
+    for (int h = 0; h < total_harts; h++) {
+        CPUState *cs = qemu_get_cpu(h);
+        RISCVCPU *rcpu = RISCV_CPU(cs);
+
+        qdev_connect_gpio_out(dm, h,
+                              qdev_get_gpio_in_named(DEVICE(cs),
+                                                     "dm-halt-req", 0));
+        rcpu->env.dm_rom_present = true;
+        rcpu->env.dm_halt_addr = s->memmap[VIRT_DEBUG].base +
+                                 RISCV_DM_ROM_ENTRY;
+    }
 
     serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
         0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
