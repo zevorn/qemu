@@ -517,6 +517,10 @@ void helper_sdext_ebreak(CPURISCVState *env, target_ulong pc)
 
     if (enter_debug) {
         riscv_cpu_enter_debug_mode(env, pc, DCSR_CAUSE_EBREAK);
+        if (env->dm_rom_present) {
+            env->pc = env->dm_halt_addr;
+            cpu_loop_exit(cs);
+        }
         cs->exception_index = EXCP_DEBUG;
         cpu_loop_exit_restore(cs, GETPC());
     }
