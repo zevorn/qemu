@@ -1,3 +1,7 @@
+config RISCV_DM
+    bool
+    select REGISTER
+
 config RISCV_IOMMU
     bool
 
@@ -68,6 +72,7 @@ config RISCV_VIRT
     select PLATFORM_BUS
     select ACPI
     select ACPI_PCI
+    select RISCV_DM
 
 config SHAKTI_C
     bool
