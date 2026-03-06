@@ -495,6 +495,13 @@ void helper_sdext_ebreak(CPURISCVState *env, target_ulong pc)
     CPUState *cs = env_cpu(env);
     bool enter_debug = false;
 
+    /* ebreak in debug mode: re-enter DM ROM at halt address */
+    if (riscv_cpu_cfg(env)->ext_sdext &&
+        env->debug_mode && env->dm_rom_present) {
+        env->pc = env->dm_halt_addr;
+        cpu_loop_exit(cs);
+    }
+
     if (riscv_cpu_cfg(env)->ext_sdext && !env->debug_mode) {
         if (env->virt_enabled) {
             if (env->priv == PRV_S) {
