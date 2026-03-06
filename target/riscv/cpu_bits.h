@@ -1177,6 +1177,7 @@ typedef enum CTRType {
 
 /* RISC-V-specific interrupt pending bits. */
 #define CPU_INTERRUPT_RNMI                 CPU_INTERRUPT_TGT_EXT_0
+#define CPU_INTERRUPT_DM_HALT              CPU_INTERRUPT_TGT_INT_0
 
 /* JVT CSR bits */
 #define JVT_MODE                           0x3F
