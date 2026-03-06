@@ -655,11 +655,30 @@ static int riscv_cpu_local_irq_pending(CPURISCVState *env)
 
 bool riscv_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
-    uint32_t mask = CPU_INTERRUPT_HARD | CPU_INTERRUPT_RNMI;
+    uint32_t mask = CPU_INTERRUPT_HARD | CPU_INTERRUPT_RNMI |
+                    CPU_INTERRUPT_DM_HALT;
 
     if (interrupt_request & mask) {
         RISCVCPU *cpu = RISCV_CPU(cs);
         CPURISCVState *env = &cpu->env;
+
+        /* DM halt request: enter debug mode before checking regular IRQs */
+        if (env->dm_halt_request && !env->debug_mode) {
+            uint32_t halt_cause = env->dm_halt_cause;
+
+            qemu_log_mask(CPU_LOG_INT,
+                          "exec_interrupt: dm_halt cause=%u pc=0x%" PRIx64
+                          " halt_addr=0x%" PRIx64 "\n",
+                          halt_cause,
+                          (uint64_t)env->pc,
+                          (uint64_t)env->dm_halt_addr);
+            env->dm_halt_request = false;
+            env->dm_halt_cause = DCSR_CAUSE_HALTREQ;
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_DM_HALT);
+            riscv_cpu_enter_debug_mode(env, env->pc, halt_cause);
+            env->pc = env->dm_halt_addr;
+            return true;
+        }
 
         if (cpu->cfg.ext_sdext && !env->debug_mode &&
             (env->dcsr & DCSR_STEP) && !(env->dcsr & DCSR_STEPIE)) {
