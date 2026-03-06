@@ -481,6 +481,10 @@ void helper_sdext_step(CPURISCVState *env)
     }
 
     riscv_cpu_enter_debug_mode(env, env->pc, DCSR_CAUSE_STEP);
+    if (env->dm_rom_present) {
+        env->pc = env->dm_halt_addr;
+        cpu_loop_exit(cs);
+    }
     cs->exception_index = EXCP_DEBUG;
     cpu_loop_exit_restore(cs, GETPC());
 #endif
