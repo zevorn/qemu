@@ -481,6 +481,10 @@ struct CPUArchState {
     target_ulong dpc;
     target_ulong dscratch[2];
 
+    /* Pending Debug Module halt request from the board-level controller. */
+    bool dm_halt_request;
+    uint8_t dm_halt_cause;
+
     uint64_t mstateen[SMSTATEEN_MAX_COUNT];
     uint64_t hstateen[SMSTATEEN_MAX_COUNT];
     uint64_t sstateen[SMSTATEEN_MAX_COUNT];
@@ -642,6 +646,7 @@ void riscv_cpu_swap_hypervisor_regs(CPURISCVState *env);
 int riscv_cpu_claim_interrupts(RISCVCPU *cpu, uint64_t interrupts);
 uint64_t riscv_cpu_update_mip(CPURISCVState *env, uint64_t mask,
                               uint64_t value);
+void riscv_cpu_request_dm_halt(RISCVCPU *cpu, uint32_t cause);
 void riscv_cpu_set_rnmi(RISCVCPU *cpu, uint32_t irq, bool level);
 void riscv_cpu_interrupt(CPURISCVState *env);
 #define BOOL_TO_MASK(x) (-!!(x)) /* helper for riscv_cpu_update_mip value */

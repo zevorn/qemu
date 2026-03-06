@@ -263,6 +263,8 @@ static const VMStateDescription vmstate_sdext = {
         VMSTATE_UINTTL(env.dcsr, RISCVCPU),
         VMSTATE_UINTTL(env.dpc, RISCVCPU),
         VMSTATE_UINTTL_ARRAY(env.dscratch, RISCVCPU, 2),
+        VMSTATE_BOOL(env.dm_halt_request, RISCVCPU),
+        VMSTATE_UINT8(env.dm_halt_cause, RISCVCPU),
         VMSTATE_END_OF_LIST()
     }
 };

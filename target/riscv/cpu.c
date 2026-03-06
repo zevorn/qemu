@@ -784,6 +784,8 @@ static void riscv_cpu_reset_hold(Object *obj, ResetType type)
 
 #ifndef CONFIG_USER_ONLY
     env->debug_mode = false;
+    env->dm_halt_request = false;
+    env->dm_halt_cause = DCSR_CAUSE_HALTREQ;
     env->dcsr = DCSR_DEBUGVER(4);
     env->dpc = 0;
     env->dscratch[0] = 0;
@@ -1086,6 +1088,70 @@ static void riscv_cpu_set_nmi(void *opaque, int irq, int level)
 {
     riscv_cpu_set_rnmi(RISCV_CPU(opaque), irq, level);
 }
+
+/*
+ * Debug cause priority (higher to lower), per Debug Spec v1.0 Table 4.2:
+ * reset-haltreq, halt-group, haltreq, trigger, ebreak, step.
+ */
+static int riscv_debug_cause_priority(uint32_t cause)
+{
+    switch (cause & 0x7) {
+    case DCSR_CAUSE_RESET:
+        return 0;
+    case DCSR_CAUSE_GROUP:
+        return 1;
+    case DCSR_CAUSE_HALTREQ:
+        return 2;
+    case DCSR_CAUSE_TRIGGER:
+        return 3;
+    case DCSR_CAUSE_EBREAK:
+        return 4;
+    case DCSR_CAUSE_STEP:
+        return 5;
+    case DCSR_CAUSE_OTHER:
+        return 6;
+    default:
+        return 7;
+    }
+}
+
+static bool riscv_debug_cause_is_higher(uint32_t new_cause,
+                                        uint32_t current_cause)
+{
+    return riscv_debug_cause_priority(new_cause) <
+           riscv_debug_cause_priority(current_cause);
+}
+
+void riscv_cpu_request_dm_halt(RISCVCPU *cpu, uint32_t cause)
+{
+    CPURISCVState *env = &cpu->env;
+    CPUState *cs = CPU(cpu);
+
+    if (!riscv_cpu_cfg(env)->ext_sdext) {
+        return;
+    }
+
+    if (env->dm_halt_request &&
+        !riscv_debug_cause_is_higher(cause, env->dm_halt_cause)) {
+        return;
+    }
+
+    env->dm_halt_request = true;
+    env->dm_halt_cause = cause & 0x7;
+    cpu_interrupt(cs, CPU_INTERRUPT_DM_HALT);
+}
+
+static void riscv_cpu_dm_halt_req(void *opaque, int irq, int level)
+{
+    RISCVCPU *cpu = RISCV_CPU(opaque);
+    CPURISCVState *env = &cpu->env;
+
+    qemu_log_mask(CPU_LOG_INT, "dm_halt_req: level=%d ext_sdext=%d\n",
+                  level, riscv_cpu_cfg(env)->ext_sdext);
+    if (level) {
+        riscv_cpu_request_dm_halt(cpu, DCSR_CAUSE_HALTREQ);
+    }
+}
 #endif /* CONFIG_USER_ONLY */
 
 static bool riscv_cpu_is_dynamic(Object *cpu_obj)
@@ -1106,6 +1172,8 @@ static void riscv_cpu_init(Object *obj)
                       IRQ_LOCAL_MAX + IRQ_LOCAL_GUEST_MAX);
     qdev_init_gpio_in_named(DEVICE(cpu), riscv_cpu_set_nmi,
                             "riscv.cpu.rnmi", RNMI_MAX);
+    qdev_init_gpio_in_named(DEVICE(cpu), riscv_cpu_dm_halt_req,
+                            "dm-halt-req", 1);
 #endif /* CONFIG_USER_ONLY */
 
     general_user_opts = g_hash_table_new(g_str_hash, g_str_equal);
