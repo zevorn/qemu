@@ -795,30 +795,37 @@ itrigger_set_count(CPURISCVState *env, int index, int value)
 static bool check_itrigger_priv(CPURISCVState *env, int index)
 {
     target_ulong tdata1 = env->tdata1[index];
+
     if (env->virt_enabled) {
-        /* check VU/VS bit against current privilege level */
-        return (get_field(tdata1, ITRIGGER_VS) == env->priv) ||
-               (get_field(tdata1, ITRIGGER_VU) == env->priv);
-    } else {
-        /* check U/S/M bit against current privilege level */
-        return (get_field(tdata1, ITRIGGER_M) == env->priv) ||
-               (get_field(tdata1, ITRIGGER_S) == env->priv) ||
-               (get_field(tdata1, ITRIGGER_U) == env->priv);
+        switch (env->priv) {
+        case PRV_S:
+            return !!(tdata1 & ITRIGGER_VS);
+        case PRV_U:
+            return !!(tdata1 & ITRIGGER_VU);
+        default:
+            return false;
+        }
+    }
+
+    switch (env->priv) {
+    case PRV_M:
+        return !!(tdata1 & ITRIGGER_M);
+    case PRV_S:
+        return !!(tdata1 & ITRIGGER_S);
+    case PRV_U:
+        return !!(tdata1 & ITRIGGER_U);
+    default:
+        return false;
     }
 }
 
 bool riscv_itrigger_enabled(CPURISCVState *env)
 {
-    int count;
     for (int i = 0; i < RV_MAX_TRIGGERS; i++) {
         if (get_trigger_type(env, i) != TRIGGER_TYPE_INST_CNT) {
             continue;
         }
-        if (check_itrigger_priv(env, i)) {
-            continue;
-        }
-        count = itrigger_get_count(env, i);
-        if (!count) {
+        if (!itrigger_get_count(env, i)) {
             continue;
         }
         return true;
