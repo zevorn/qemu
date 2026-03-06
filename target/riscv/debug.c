@@ -916,14 +916,26 @@ static target_ulong itrigger_validate(CPURISCVState *env,
                                       target_ulong ctrl)
 {
     target_ulong val;
+    uint32_t action;
 
     /* validate the generic part first */
     val = tdata1_validate(env, ctrl, TRIGGER_TYPE_INST_CNT);
 
-    /* validate unimplemented (always zero) bits */
-    warn_always_zero_bit(ctrl, ITRIGGER_ACTION, "action");
     warn_always_zero_bit(ctrl, ITRIGGER_HIT, "hit");
     warn_always_zero_bit(ctrl, ITRIGGER_PENDING, "pending");
+
+    action = ctrl & ITRIGGER_ACTION;
+    if (action == DBG_ACTION_DBG_MODE) {
+        if (env_archcpu(env)->cfg.ext_sdext) {
+            val |= action;
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "trigger action=debug mode requires Sdext\n");
+        }
+    } else if (action != DBG_ACTION_BP) {
+        qemu_log_mask(LOG_UNIMP, "trigger action: %u is not supported\n",
+                      action);
+    }
 
     /* keep the mode and attribute bits */
     val |= ctrl & (ITRIGGER_VU | ITRIGGER_VS | ITRIGGER_U | ITRIGGER_S |
