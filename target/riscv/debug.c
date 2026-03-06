@@ -586,6 +586,29 @@ static int riscv_debug_find_breakpoint_trigger(CPUState *cs)
     return -1;
 }
 
+static int riscv_debug_find_watchpoint_trigger(CPUState *cs, CPUWatchpoint *wp)
+{
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    CPURISCVState *env = &cpu->env;
+
+    for (int i = 0; i < RV_MAX_TRIGGERS; i++) {
+        int trigger_type = get_trigger_type(env, i);
+
+        if (!trigger_common_match(env, trigger_type, i)) {
+            continue;
+        }
+
+        if (wp != env->cpu_watchpoint[i]) {
+            continue;
+        }
+
+        env->badaddr = wp->hitaddr;
+        return i;
+    }
+
+    return -1;
+}
+
 static void type2_reg_write(CPURISCVState *env, target_ulong index,
                             int tdata_index, target_ulong val)
 {
@@ -1012,17 +1035,21 @@ void riscv_cpu_debug_excp_handler(CPUState *cs)
         return;
     }
 
-    if (cs->watchpoint_hit) {
-        if (cs->watchpoint_hit->flags & BP_CPU) {
-            do_trigger_action(env, DBG_ACTION_BP);
-        }
-    } else {
-        if (hit < 0) {
-            hit = riscv_debug_find_breakpoint_trigger(cs);
-        }
-        if (hit >= 0) {
-            do_trigger_action(env, hit);
-        }
+    if (hit < 0 && cs->watchpoint_hit && (cs->watchpoint_hit->flags & BP_CPU)) {
+        hit = riscv_debug_find_watchpoint_trigger(cs, cs->watchpoint_hit);
+    }
+
+    if (cs->watchpoint_hit &&
+        (hit >= 0 || (cs->watchpoint_hit->flags & BP_CPU))) {
+        cs->watchpoint_hit = NULL;
+    }
+
+    if (hit < 0) {
+        hit = riscv_debug_find_breakpoint_trigger(cs);
+    }
+
+    if (hit >= 0) {
+        do_trigger_action(env, hit);
     }
 }
 
@@ -1039,59 +1066,9 @@ bool riscv_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
-    target_ulong ctrl;
-    target_ulong addr;
-    int trigger_type;
-    int flags;
-    int i;
 
-    for (i = 0; i < RV_MAX_TRIGGERS; i++) {
-        trigger_type = get_trigger_type(env, i);
-
-        if (!trigger_common_match(env, trigger_type, i)) {
-            continue;
-        }
-
-        switch (trigger_type) {
-        case TRIGGER_TYPE_AD_MATCH:
-            ctrl = env->tdata1[i];
-            addr = env->tdata2[i];
-            flags = 0;
-
-            if (ctrl & TYPE2_LOAD) {
-                flags |= BP_MEM_READ;
-            }
-            if (ctrl & TYPE2_STORE) {
-                flags |= BP_MEM_WRITE;
-            }
-
-            if ((wp->flags & flags) && (wp->vaddr == addr)) {
-                return true;
-            }
-            break;
-        case TRIGGER_TYPE_AD_MATCH6:
-            ctrl = env->tdata1[i];
-            addr = env->tdata2[i];
-            flags = 0;
-
-            if (ctrl & TYPE6_LOAD) {
-                flags |= BP_MEM_READ;
-            }
-            if (ctrl & TYPE6_STORE) {
-                flags |= BP_MEM_WRITE;
-            }
-
-            if ((wp->flags & flags) && (wp->vaddr == addr)) {
-                return true;
-            }
-            break;
-        default:
-            /* other trigger types are not supported */
-            break;
-        }
-    }
-
-    return false;
+    env->pending_trigger_hit = riscv_debug_find_watchpoint_trigger(cs, wp);
+    return env->pending_trigger_hit >= 0;
 }
 
 void riscv_trigger_realize(CPURISCVState *env)
