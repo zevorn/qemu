@@ -142,6 +142,9 @@ static bool riscv_sdext_enabled(CPURISCVState *env)
     return riscv_cpu_cfg(env)->ext_sdext;
 }
 
+/* DM ROM entry window offsets: exception vector is entry + 0x10 (0x810). */
+#define RISCV_DEBUG_ROM_EXCEPTION_OFS 0x10
+
 /*
  * Debug Spec v1.0 Table 9:
  * - ebreak: dpc = address of the ebreak instruction.
@@ -2323,6 +2326,15 @@ void riscv_cpu_do_interrupt(CPUState *cs)
     if (cpu->cfg.ext_smrnmi && env->rnmip && async) {
         riscv_do_nmi(env, cause | ((target_ulong)1U << (mxlen - 1)),
                      env->virt_enabled);
+        return;
+    }
+
+    if (env->debug_mode && env->dm_rom_present) {
+        /*
+         * Exceptions taken while already in Debug Mode are handled by the
+         * DM ROM exception entry (0x810 in the backing ROM).
+         */
+        env->pc = env->dm_halt_addr + RISCV_DEBUG_ROM_EXCEPTION_OFS;
         return;
     }
 
