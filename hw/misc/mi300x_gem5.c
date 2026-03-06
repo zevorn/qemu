@@ -7,6 +7,10 @@
  * shared memory. gem5 can issue DMA reads/writes back into QEMU guest
  * memory and raise MSI-X interrupts.
  *
+ * Uses two separate socket connections to gem5:
+ *   - MMIO socket: synchronous request/response for BAR read/write
+ *   - Event socket: async gem5->QEMU notifications (IRQ, DMA)
+ *
  * Usage:
  *   -device mi300x-gem5,gem5-socket=/tmp/gem5.sock,shmem-path=/dev/shm/mi300x-vram
  *
@@ -48,7 +52,11 @@
  * gem5 Socket Communication
  * ====================================================================== */
 
-static int mi300x_connect_gem5(MI300XGem5State *s)
+/*
+ * Connect to gem5's Unix domain socket.
+ * Returns fd on success, -1 on error.
+ */
+static int mi300x_socket_connect(MI300XGem5State *s)
 {
     struct sockaddr_un addr;
     int fd;
@@ -77,71 +85,64 @@ static int mi300x_connect_gem5(MI300XGem5State *s)
 
     MI300X_DPRINTF("Connected to gem5 at %s (fd=%d)\n",
                    s->gem5_socket_path, fd);
-    s->gem5_sock_fd = fd;
-    return 0;
+    return fd;
 }
 
 static void mi300x_disconnect_gem5(MI300XGem5State *s)
 {
-    if (s->gem5_sock_fd >= 0) {
+    if (s->gem5_mmio_fd >= 0) {
         MI300XGem5MsgHeader msg = {
             .type = cpu_to_le32(MI300X_MSG_SHUTDOWN),
             .size = 0,
         };
         /* Best effort shutdown notification */
-        ssize_t r = write(s->gem5_sock_fd, &msg, sizeof(msg));
+        ssize_t r = write(s->gem5_mmio_fd, &msg, sizeof(msg));
         (void)r;
-        close(s->gem5_sock_fd);
-        s->gem5_sock_fd = -1;
+        close(s->gem5_mmio_fd);
+        s->gem5_mmio_fd = -1;
+    }
+    if (s->gem5_event_fd >= 0) {
+        close(s->gem5_event_fd);
+        s->gem5_event_fd = -1;
     }
 }
 
 /*
- * Send a message to gem5 and optionally receive a response.
+ * Send a message on the MMIO socket and optionally receive a response.
+ * This is used only for synchronous MMIO operations.
  * Returns 0 on success, -1 on error.
  */
-static int mi300x_send_msg(MI300XGem5State *s,
-                           MI300XGem5MsgHeader *request,
-                           MI300XGem5MsgHeader *response)
+static int mi300x_mmio_send(MI300XGem5State *s,
+                            MI300XGem5MsgHeader *request,
+                            MI300XGem5MsgHeader *response)
 {
     ssize_t ret;
 
-    if (s->gem5_sock_fd < 0) {
+    if (s->gem5_mmio_fd < 0) {
         return -1;
     }
 
-    qemu_mutex_lock(&s->txn_mutex);
+    qemu_mutex_lock(&s->mmio_mutex);
 
     request->id = cpu_to_le32(s->next_txn_id++);
 
-    ret = write(s->gem5_sock_fd, request, MI300X_MSG_HDR_SIZE);
+    ret = write(s->gem5_mmio_fd, request, MI300X_MSG_HDR_SIZE);
     if (ret != MI300X_MSG_HDR_SIZE) {
-        error_report("MI300X: short write to gem5 socket");
-        qemu_mutex_unlock(&s->txn_mutex);
+        error_report("MI300X: short write to gem5 MMIO socket");
+        qemu_mutex_unlock(&s->mmio_mutex);
         return -1;
     }
 
-    /* If payload data follows the header, send it too */
-    if (le32_to_cpu(request->size) > 0 && s->dma_buf) {
-        uint32_t payload_size = le32_to_cpu(request->size);
-        ret = write(s->gem5_sock_fd, s->dma_buf, payload_size);
-        if (ret != payload_size) {
-            error_report("MI300X: short payload write to gem5");
-            qemu_mutex_unlock(&s->txn_mutex);
-            return -1;
-        }
-    }
-
     if (response) {
-        ret = read(s->gem5_sock_fd, response, MI300X_MSG_HDR_SIZE);
+        ret = read(s->gem5_mmio_fd, response, MI300X_MSG_HDR_SIZE);
         if (ret != MI300X_MSG_HDR_SIZE) {
-            error_report("MI300X: short read from gem5 socket");
-            qemu_mutex_unlock(&s->txn_mutex);
+            error_report("MI300X: short read from gem5 MMIO socket");
+            qemu_mutex_unlock(&s->mmio_mutex);
             return -1;
         }
     }
 
-    qemu_mutex_unlock(&s->txn_mutex);
+    qemu_mutex_unlock(&s->mmio_mutex);
     return 0;
 }
 
@@ -155,10 +156,6 @@ static int mi300x_setup_shmem(MI300XGem5State *s, Error **errp)
     void *ptr;
 
     if (!s->shmem_path || s->shmem_path[0] == '\0') {
-        /*
-         * No shared memory path: allocate anonymous VRAM.
-         * This mode works standalone without gem5.
-         */
         MI300X_DPRINTF("No shmem path, using anonymous VRAM mapping\n");
         return 0;
     }
@@ -204,7 +201,10 @@ static void mi300x_cleanup_shmem(MI300XGem5State *s)
 }
 
 /* ======================================================================
- * gem5 Event Thread - receives async events (interrupts, DMA) from gem5
+ * gem5 Event Thread - receives async events on the EVENT socket
+ *
+ * This thread reads ONLY from gem5_event_fd (the second connection),
+ * so there is no race with the MMIO path which uses gem5_mmio_fd.
  * ====================================================================== */
 
 static void mi300x_handle_irq_raise(MI300XGem5State *s,
@@ -263,7 +263,7 @@ static void mi300x_handle_dma_read(MI300XGem5State *s,
     pci_dma_read(PCI_DEVICE(s), addr, s->dma_buf, len);
     bql_unlock();
 
-    /* Send DMA data back to gem5 */
+    /* Send DMA data back to gem5 on the event socket */
     resp = (MI300XGem5MsgHeader){
         .type = cpu_to_le32(MI300X_MSG_MMIO_RESP),
         .size = cpu_to_le32(len),
@@ -272,12 +272,11 @@ static void mi300x_handle_dma_read(MI300XGem5State *s,
         .id = msg->id,
     };
 
-    qemu_mutex_lock(&s->txn_mutex);
-    ret = write(s->gem5_sock_fd, &resp, MI300X_MSG_HDR_SIZE);
+    /* Event fd is only accessed by the event thread, no mutex needed */
+    ret = write(s->gem5_event_fd, &resp, MI300X_MSG_HDR_SIZE);
     if (ret == MI300X_MSG_HDR_SIZE) {
-        ret = write(s->gem5_sock_fd, s->dma_buf, len);
+        ret = write(s->gem5_event_fd, s->dma_buf, len);
     }
-    qemu_mutex_unlock(&s->txn_mutex);
 
     if (ret < 0) {
         error_report("MI300X: failed to send DMA read response");
@@ -299,8 +298,8 @@ static void mi300x_handle_dma_write(MI300XGem5State *s,
         return;
     }
 
-    /* Read the payload data from socket */
-    ret = read(s->gem5_sock_fd, s->dma_buf, len);
+    /* Read the payload data from the event socket */
+    ret = read(s->gem5_event_fd, s->dma_buf, len);
     if (ret != (ssize_t)len) {
         error_report("MI300X: short DMA write payload read");
         return;
@@ -317,16 +316,16 @@ static void *mi300x_event_thread(void *opaque)
     MI300XGem5MsgHeader msg;
     ssize_t ret;
 
-    MI300X_DPRINTF("Event thread started\n");
+    MI300X_DPRINTF("Event thread started (fd=%d)\n", s->gem5_event_fd);
 
-    while (!s->stopping && s->gem5_sock_fd >= 0) {
-        ret = read(s->gem5_sock_fd, &msg, MI300X_MSG_HDR_SIZE);
+    while (!s->stopping && s->gem5_event_fd >= 0) {
+        ret = read(s->gem5_event_fd, &msg, MI300X_MSG_HDR_SIZE);
         if (ret <= 0) {
             if (s->stopping) {
                 break;
             }
             if (ret == 0) {
-                error_report("MI300X: gem5 disconnected");
+                error_report("MI300X: gem5 event connection closed");
             } else {
                 error_report("MI300X: event read error: %s", strerror(errno));
             }
@@ -373,18 +372,15 @@ static uint64_t mi300x_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     MI300X_DPRINTF("MMIO read addr=0x%" HWADDR_PRIx " size=%u\n", addr, size);
 
-    if (s->gem5_sock_fd < 0) {
-        /*
-         * Standalone mode: return identification registers for amdgpu driver
-         * probe. These match MI300X (gfx942) identification values.
-         */
+    if (s->gem5_mmio_fd < 0) {
+        /* Standalone mode: return identification registers */
         switch (addr) {
-        case 0x00:  /* MM_INDEX or device ID scratch */
+        case 0x00:
             return PCI_DEVICE_ID_MI300X;
-        case 0x04:  /* MM_DATA */
+        case 0x04:
             return 0;
         case 0xD000: /* GRBM_STATUS */
-            return 0;  /* GPU idle */
+            return 0;
         case 0xD004: /* GRBM_STATUS2 */
             return 0;
         default:
@@ -400,7 +396,7 @@ static uint64_t mi300x_mmio_read(void *opaque, hwaddr addr, unsigned size)
         .access_size = cpu_to_le32(size),
     };
 
-    if (mi300x_send_msg(s, &req, &resp) == 0) {
+    if (mi300x_mmio_send(s, &req, &resp) == 0) {
         val = le64_to_cpu(resp.data);
     }
 
@@ -416,8 +412,7 @@ static void mi300x_mmio_write(void *opaque, hwaddr addr,
     MI300X_DPRINTF("MMIO write addr=0x%" HWADDR_PRIx " val=0x%" PRIx64
                    " size=%u\n", addr, val, size);
 
-    if (s->gem5_sock_fd < 0) {
-        /* Standalone mode: silently accept writes */
+    if (s->gem5_mmio_fd < 0) {
         return;
     }
 
@@ -429,7 +424,7 @@ static void mi300x_mmio_write(void *opaque, hwaddr addr,
         .access_size = cpu_to_le32(size),
     };
 
-    mi300x_send_msg(s, &req, NULL);
+    mi300x_mmio_send(s, &req, NULL);
 }
 
 static const MemoryRegionOps mi300x_mmio_ops = {
@@ -459,7 +454,7 @@ static uint64_t mi300x_doorbell_read(void *opaque, hwaddr addr, unsigned size)
     MI300X_DPRINTF("Doorbell read addr=0x%" HWADDR_PRIx " size=%u\n",
                    addr, size);
 
-    if (s->gem5_sock_fd < 0) {
+    if (s->gem5_mmio_fd < 0) {
         return 0;
     }
 
@@ -471,7 +466,7 @@ static uint64_t mi300x_doorbell_read(void *opaque, hwaddr addr, unsigned size)
         .access_size = cpu_to_le32(size),
     };
 
-    if (mi300x_send_msg(s, &req, &resp) == 0) {
+    if (mi300x_mmio_send(s, &req, &resp) == 0) {
         val = le64_to_cpu(resp.data);
     }
 
@@ -487,7 +482,7 @@ static void mi300x_doorbell_write(void *opaque, hwaddr addr,
     MI300X_DPRINTF("Doorbell write addr=0x%" HWADDR_PRIx " val=0x%" PRIx64
                    " size=%u\n", addr, val, size);
 
-    if (s->gem5_sock_fd < 0) {
+    if (s->gem5_mmio_fd < 0) {
         return;
     }
 
@@ -500,7 +495,7 @@ static void mi300x_doorbell_write(void *opaque, hwaddr addr,
     };
 
     /* Doorbell writes are fire-and-forget for performance */
-    mi300x_send_msg(s, &req, NULL);
+    mi300x_mmio_send(s, &req, NULL);
 }
 
 static const MemoryRegionOps mi300x_doorbell_ops = {
@@ -530,9 +525,6 @@ static void mi300x_setup_pci_config(PCIDevice *pdev)
 
     /* Capabilities: support 64-bit, prefetchable for BARs */
     pci_config_set_interrupt_pin(pci_conf, 1);
-
-    /* PCIe link capabilities: Gen5 x16 for MI300X */
-    /* These will be set via pcie_endpoint_cap_init */
 
     /*
      * Set PCI subsystem IDs to match MI300X.
@@ -590,7 +582,6 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
 
     /* BAR2: VRAM (shared memory with gem5) */
     if (s->shmem_path && s->shmem_path[0] != '\0') {
-        /* Setup shared memory for VRAM */
         if (mi300x_setup_shmem(s, errp) < 0) {
             return;
         }
@@ -602,7 +593,6 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
             return;
         }
     } else {
-        /* Anonymous VRAM for standalone mode */
         if (!memory_region_init_ram(&s->vram_bar, OBJECT(s),
                                     "mi300x-vram", s->vram_size, errp)) {
             return;
@@ -625,8 +615,8 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
     /* Allocate DMA staging buffer */
     s->dma_buf = g_malloc0(MI300X_DMA_BUF_SIZE);
 
-    /* Initialize transaction mutex */
-    qemu_mutex_init(&s->txn_mutex);
+    /* Initialize MMIO mutex */
+    qemu_mutex_init(&s->mmio_mutex);
 
     /* Block migration */
     error_setg(&s->migration_blocker,
@@ -636,24 +626,39 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
-    /* Connect to gem5 if auto-connect enabled and socket path given */
+    /*
+     * Connect to gem5 if auto-connect enabled.
+     * Two connections: one for MMIO (sync), one for events (async).
+     */
     if (s->auto_connect && s->gem5_socket_path) {
-        if (mi300x_connect_gem5(s) == 0) {
-            /* Send init message */
+        /* First connection: MMIO */
+        s->gem5_mmio_fd = mi300x_socket_connect(s);
+        if (s->gem5_mmio_fd >= 0) {
+            /* Send init message on MMIO socket */
             MI300XGem5MsgHeader init_msg = {
                 .type = cpu_to_le32(MI300X_MSG_INIT),
                 .size = 0,
                 .data = cpu_to_le64(s->vram_size),
             };
             MI300XGem5MsgHeader init_resp;
-            mi300x_send_msg(s, &init_msg, &init_resp);
+            mi300x_mmio_send(s, &init_msg, &init_resp);
 
-            /* Start event thread for async gem5 notifications */
-            s->stopping = false;
-            s->event_thread_running = true;
-            qemu_thread_create(&s->event_thread, "mi300x-gem5-events",
-                               mi300x_event_thread, s,
-                               QEMU_THREAD_JOINABLE);
+            MI300X_DPRINTF("INIT response: gem5 vram=%" PRIu64 "\n",
+                          le64_to_cpu(init_resp.data));
+
+            /* Second connection: Events (gem5->QEMU async) */
+            s->gem5_event_fd = mi300x_socket_connect(s);
+            if (s->gem5_event_fd >= 0) {
+                /* Start event thread only if event connection succeeded */
+                s->stopping = false;
+                s->event_thread_running = true;
+                qemu_thread_create(&s->event_thread, "mi300x-gem5-events",
+                                   mi300x_event_thread, s,
+                                   QEMU_THREAD_JOINABLE);
+            } else {
+                error_report("MI300X: event connection failed, "
+                            "DMA/IRQ from gem5 disabled");
+            }
         } else {
             error_report("MI300X: running in standalone mode "
                         "(gem5 not connected)");
@@ -673,17 +678,20 @@ static void mi300x_gem5_exit(PCIDevice *pdev)
     /* Stop event thread */
     if (s->event_thread_running) {
         s->stopping = true;
-        /* Close socket to unblock the read in event thread */
-        mi300x_disconnect_gem5(s);
+        /* Close event socket to unblock the read in event thread */
+        if (s->gem5_event_fd >= 0) {
+            close(s->gem5_event_fd);
+            s->gem5_event_fd = -1;
+        }
         qemu_thread_join(&s->event_thread);
         s->event_thread_running = false;
-    } else {
-        mi300x_disconnect_gem5(s);
     }
+
+    mi300x_disconnect_gem5(s);
 
     migrate_del_blocker(&s->migration_blocker);
 
-    qemu_mutex_destroy(&s->txn_mutex);
+    qemu_mutex_destroy(&s->mmio_mutex);
 
     g_free(s->dma_buf);
     s->dma_buf = NULL;
@@ -708,7 +716,8 @@ static void mi300x_gem5_instance_init(Object *obj)
 {
     MI300XGem5State *s = MI300X_GEM5(obj);
 
-    s->gem5_sock_fd = -1;
+    s->gem5_mmio_fd = -1;
+    s->gem5_event_fd = -1;
     s->shmem_fd = -1;
     s->shmem_ptr = NULL;
     s->event_thread_running = false;

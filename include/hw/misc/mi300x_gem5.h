@@ -87,6 +87,10 @@ typedef struct MI300XGem5MsgHeader {
 
 /*
  * Device state
+ *
+ * Uses two socket connections to gem5 to avoid race conditions:
+ *   - gem5_mmio_fd: synchronous MMIO request/response (QEMU main thread)
+ *   - gem5_event_fd: async events from gem5 (IRQ, DMA) (event thread)
  */
 struct MI300XGem5State {
     /* Private */
@@ -97,10 +101,11 @@ struct MI300XGem5State {
     MemoryRegion vram_bar;      /* BAR2: VRAM (shared memory) */
     MemoryRegion doorbell_bar;  /* BAR4: Doorbell/signal pages */
 
-    /* gem5 connection */
+    /* gem5 connection - two sockets for clean separation */
     char *gem5_socket_path;     /* path to gem5 Unix domain socket */
     char *shmem_path;           /* path to shared memory file for VRAM */
-    int gem5_sock_fd;           /* socket fd to gem5 (-1 if disconnected) */
+    int gem5_mmio_fd;           /* socket fd for MMIO (sync req/resp) */
+    int gem5_event_fd;          /* socket fd for events (async gem5->QEMU) */
     int shmem_fd;               /* shared memory fd for VRAM */
     void *shmem_ptr;            /* mmap'd VRAM shared memory */
 
@@ -111,7 +116,7 @@ struct MI300XGem5State {
 
     /* Transaction tracking */
     uint32_t next_txn_id;       /* monotonic transaction ID counter */
-    QemuMutex txn_mutex;        /* protects socket I/O */
+    QemuMutex mmio_mutex;       /* protects MMIO socket I/O */
 
     /* gem5 async event handling */
     QemuThread event_thread;    /* thread for receiving gem5 events */
