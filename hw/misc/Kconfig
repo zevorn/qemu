@@ -86,6 +86,11 @@ config IVSHMEM_FLAT_DEVICE
     default y
     depends on LINUX && IVSHMEM
 
+config MI300X_GEM5
+    bool
+    default y if PCI_DEVICES
+    depends on PCI && LINUX && MSI_NONBROKEN
+
 config ECCMEMCTL
     bool
 
