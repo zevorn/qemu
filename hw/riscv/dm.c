@@ -240,22 +240,20 @@ static void dm_debug_reset(RISCVDMState *s);
 
 static void dm_cpu_reset_on_cpu(CPUState *cpu, run_on_cpu_data data)
 {
-    (void)data;
+    bool request_reset_halt = data.host_int;
+
     cpu_reset(cpu);
+    if (request_reset_halt) {
+        riscv_cpu_request_dm_halt(RISCV_CPU(cpu), DCSR_CAUSE_RESET);
+    }
 }
 
 static void dm_note_hart_reset(RISCVDMState *s, uint32_t hartsel)
 {
-    CPUState *cs = qemu_get_cpu(hartsel);
-
     s->hart_halted[hartsel] = false;
     s->hart_resumeack[hartsel] = false;
     s->hart_havereset[hartsel] = true;
     dm_rom_write8(s, RISCV_DM_ROM_FLAGS + hartsel, RISCV_DM_FLAG_CLEAR);
-
-    if (cs && s->hart_resethaltreq[hartsel]) {
-        riscv_cpu_request_dm_halt(RISCV_CPU(cs), DCSR_CAUSE_RESET);
-    }
 }
 
 static void dm_reset_hart(RISCVDMState *s, uint32_t hartsel)
@@ -268,10 +266,15 @@ static void dm_reset_hart(RISCVDMState *s, uint32_t hartsel)
 
     cs = qemu_get_cpu(hartsel);
     if (cs && tcg_enabled()) {
-        run_on_cpu(cs, dm_cpu_reset_on_cpu, RUN_ON_CPU_NULL);
+        run_on_cpu(cs, dm_cpu_reset_on_cpu,
+                   RUN_ON_CPU_HOST_INT(s->hart_resethaltreq[hartsel]));
     }
 
     dm_note_hart_reset(s, hartsel);
+
+    if (cs && !tcg_enabled() && s->hart_resethaltreq[hartsel]) {
+        riscv_cpu_request_dm_halt(RISCV_CPU(cs), DCSR_CAUSE_RESET);
+    }
 }
 
 static void dm_reset_selected_harts(RISCVDMState *s, DMHartSelection *sel)
