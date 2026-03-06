@@ -558,6 +558,34 @@ static void type2_breakpoint_remove(CPURISCVState *env, target_ulong index)
     }
 }
 
+static int riscv_debug_find_breakpoint_trigger(CPUState *cs)
+{
+    RISCVCPU *cpu = RISCV_CPU(cs);
+    CPURISCVState *env = &cpu->env;
+    CPUBreakpoint *bp;
+
+    QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
+        if (!(bp->flags & BP_CPU) || bp->pc != env->pc) {
+            continue;
+        }
+
+        for (int i = 0; i < RV_MAX_TRIGGERS; i++) {
+            int trigger_type = get_trigger_type(env, i);
+
+            if (!trigger_common_match(env, trigger_type, i)) {
+                continue;
+            }
+
+            if (bp == env->cpu_breakpoint[i]) {
+                env->badaddr = bp->pc;
+                return i;
+            }
+        }
+    }
+
+    return -1;
+}
+
 static void type2_reg_write(CPURISCVState *env, target_ulong index,
                             int tdata_index, target_ulong val)
 {
@@ -975,6 +1003,9 @@ void riscv_cpu_debug_excp_handler(CPUState *cs)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
+    int hit = env->pending_trigger_hit;
+
+    env->pending_trigger_hit = -1;
 
     /* Triggers must not match or fire while in Debug Mode. */
     if (env->debug_mode) {
@@ -986,8 +1017,11 @@ void riscv_cpu_debug_excp_handler(CPUState *cs)
             do_trigger_action(env, DBG_ACTION_BP);
         }
     } else {
-        if (cpu_breakpoint_test(cs, env->pc, BP_CPU)) {
-            do_trigger_action(env, DBG_ACTION_BP);
+        if (hit < 0) {
+            hit = riscv_debug_find_breakpoint_trigger(cs);
+        }
+        if (hit >= 0) {
+            do_trigger_action(env, hit);
         }
     }
 }
@@ -996,47 +1030,9 @@ bool riscv_cpu_debug_check_breakpoint(CPUState *cs)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
     CPURISCVState *env = &cpu->env;
-    CPUBreakpoint *bp;
-    target_ulong ctrl;
-    target_ulong pc;
-    int trigger_type;
-    int i;
 
-    QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
-        for (i = 0; i < RV_MAX_TRIGGERS; i++) {
-            trigger_type = get_trigger_type(env, i);
-
-            if (!trigger_common_match(env, trigger_type, i)) {
-                continue;
-            }
-
-            switch (trigger_type) {
-            case TRIGGER_TYPE_AD_MATCH:
-                ctrl = env->tdata1[i];
-                pc = env->tdata2[i];
-
-                if ((ctrl & TYPE2_EXEC) && (bp->pc == pc)) {
-                    env->badaddr = pc;
-                    return true;
-                }
-                break;
-            case TRIGGER_TYPE_AD_MATCH6:
-                ctrl = env->tdata1[i];
-                pc = env->tdata2[i];
-
-                if ((ctrl & TYPE6_EXEC) && (bp->pc == pc)) {
-                    env->badaddr = pc;
-                    return true;
-                }
-                break;
-            default:
-                /* other trigger types are not supported or irrelevant */
-                break;
-            }
-        }
-    }
-
-    return false;
+    env->pending_trigger_hit = riscv_debug_find_breakpoint_trigger(cs);
+    return env->pending_trigger_hit >= 0;
 }
 
 bool riscv_cpu_debug_check_watchpoint(CPUState *cs, CPUWatchpoint *wp)
@@ -1137,4 +1133,5 @@ void riscv_trigger_reset_hold(CPURISCVState *env)
     }
 
     env->mcontext = 0;
+    env->pending_trigger_hit = -1;
 }
