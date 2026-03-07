@@ -1,5 +1,19 @@
 # See documentation at docs/devel/tracing.rst
 
+# dm.c
+riscv_dm_control_write(uint32_t old_val, uint32_t new_val, bool busy) "old=0x%08x new=0x%08x busy=%d"
+riscv_dm_control_halt(uint32_t hartsel) "hartsel=%u"
+riscv_dm_control_resume(uint32_t hartsel) "hartsel=%u"
+riscv_dm_hart_halted(uint32_t hartsel) "hartsel=%u"
+riscv_dm_hart_resumed(uint32_t hartsel) "hartsel=%u"
+riscv_dm_abstract_cmd_submit(uint32_t cmdtype, uint32_t regno, bool transfer, bool write, bool aarpostinc, bool postexec) "cmdtype=%u regno=0x%04x transfer=%d write=%d aarpostinc=%d postexec=%d"
+riscv_dm_abstract_cmd_complete(uint32_t hartsel) "hartsel=%u"
+riscv_dm_abstract_cmd_exception(uint32_t hartsel) "hartsel=%u"
+riscv_dm_abstract_cmd_rejected(const char *reason, uint32_t cmderr) "reason=%s cmderr=%u"
+riscv_dm_sba_access(uint64_t addr, uint32_t data, int bytes, bool is_write) "addr=0x%"PRIx64" data=0x%08x bytes=%d write=%d"
+riscv_dm_rom_access(uint64_t offset, uint64_t value, unsigned size, bool is_write) "offset=0x%"PRIx64" value=0x%"PRIx64" size=%u write=%d"
+riscv_dm_going(uint32_t hartsel) "hartsel=%u"
+
 # riscv-iommu.c
 riscv_iommu_new(const char *id, unsigned b, unsigned d, unsigned f) "%s: device attached %04x:%02x.%d"
 riscv_iommu_flt(const char *id, unsigned b, unsigned d, unsigned f, uint64_t reason, uint64_t iova) "%s: fault %04x:%02x.%u reason: 0x%"PRIx64" iova: 0x%"PRIx64
