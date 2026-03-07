@@ -213,6 +213,139 @@ static void sim_cpu_exception(QTestState *qts)
     rom_write32(qts, ROM_EXCP, 0);
 }
 
+/* TCG-mode helpers: real CPU execution with clock stepping. */
+
+static QTestState *tcg_dm_init(void)
+{
+    const char *arch = qtest_get_arch();
+    const char *cpu_type = strstr(arch, "64") ? "rv64" : "rv32";
+    g_autofree char *args = g_strdup_printf(
+        "-machine virt -accel tcg -smp 1 -cpu %s,sdext=true", cpu_type);
+    QTestState *qts = qtest_init(args);
+
+    /* Check VM status */
+    QDict *resp = qtest_qmp(qts, "{'execute': 'query-status'}");
+    const QDict *ret = qdict_get_qdict(resp, "return");
+    bool running = qdict_get_bool(ret, "running");
+    const char *vm_status = qdict_get_str(ret, "status");
+    g_test_message("VM status: %s running=%d", vm_status, running);
+    qobject_unref(resp);
+
+    if (!running) {
+        resp = qtest_qmp(qts, "{'execute': 'cont'}");
+        g_test_message("Sent cont");
+        qobject_unref(resp);
+    }
+
+    /* Let the CPU boot via MTTCG thread */
+    g_usleep(TCG_BOOT_US);
+
+    dm_set_active(qts);
+    return qts;
+}
+
+static bool tcg_wait_for_halt(QTestState *qts)
+{
+    for (int t = 0; t < TCG_POLL_TIMEOUT_US; t += TCG_POLL_STEP_US) {
+        g_usleep(TCG_POLL_STEP_US);
+        uint32_t st = dm_read(qts, A_DMSTATUS);
+        if (t < TCG_POLL_STEP_US * 5) {
+            g_test_message("halt poll: DMSTATUS=0x%08x", st);
+        }
+        if (st & DMSTATUS_ALLHALTED) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tcg_wait_for_cmd_done(QTestState *qts)
+{
+    for (int t = 0; t < TCG_POLL_TIMEOUT_US; t += TCG_POLL_STEP_US) {
+        g_usleep(TCG_POLL_STEP_US);
+        if (!(dm_read(qts, A_ABSTRACTCS) & ABSTRACTCS_BUSY)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tcg_halt_hart(QTestState *qts)
+{
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    return tcg_wait_for_halt(qts);
+}
+
+static bool tcg_resume_hart(QTestState *qts)
+{
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_RESUMEREQ);
+    for (int t = 0; t < TCG_POLL_TIMEOUT_US; t += TCG_POLL_STEP_US) {
+        g_usleep(TCG_POLL_STEP_US);
+        if (dm_read(qts, A_DMSTATUS) & DMSTATUS_ALLRESUMEACK) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+/*
+ * Read a register via Access Register abstract command.
+ * Returns true on success, false on error or timeout.
+ */
+static bool tcg_abstract_read_reg(QTestState *qts, uint32_t regno,
+                                  uint32_t *val)
+{
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    uint32_t cmd = (0u << 24) |     /* cmdtype = Access Register */
+                   (1u << 17) |     /* transfer = 1 */
+                   (2u << 20) |     /* aarsize = 32-bit */
+                   (regno & 0xFFFF);
+    dm_write(qts, A_COMMAND, cmd);
+
+    if (!tcg_wait_for_cmd_done(qts)) {
+        return false;
+    }
+
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    if (acs & ABSTRACTCS_CMDERR_MASK) {
+        return false;
+    }
+
+    *val = dm_read(qts, A_DATA0);
+    return true;
+}
+
+/*
+ * Write a register via Access Register abstract command.
+ * Returns true on success, false on error or timeout.
+ */
+static bool tcg_abstract_write_reg(QTestState *qts, uint32_t regno,
+                                   uint32_t val)
+{
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+    dm_write(qts, A_DATA0, val);
+
+    uint32_t cmd = (0u << 24) |     /* cmdtype = Access Register */
+                   (1u << 17) |     /* transfer = 1 */
+                   (1u << 16) |     /* write = 1 */
+                   (2u << 20) |     /* aarsize = 32-bit */
+                   (regno & 0xFFFF);
+    dm_write(qts, A_COMMAND, cmd);
+
+    if (!tcg_wait_for_cmd_done(qts)) {
+        return false;
+    }
+
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    return !(acs & ABSTRACTCS_CMDERR_MASK);
+}
+
+/*
+ * Write a 64-bit register via Access Register abstract command (aarsize=3).
+ * DATA1 holds high 32 bits, DATA0 holds low 32 bits.
+ */
 
 /*
  * Test: dmactive gate.
@@ -930,6 +1063,218 @@ static void test_haltsum1_window(void)
  * 4. Read DPC via abstract command → verify it's a valid address
  * 5. Resume CPU, then re-halt to verify the cycle works
  */
+static void test_tcg_halt_dpc(void)
+{
+    QTestState *qts = tcg_dm_init();
+
+    /* Halt the CPU */
+    g_assert_true(tcg_halt_hart(qts));
+
+    uint32_t status = dm_read(qts, A_DMSTATUS);
+    g_assert_cmpuint(status & DMSTATUS_ALLHALTED, ==, DMSTATUS_ALLHALTED);
+    g_assert_cmpuint(status & DMSTATUS_ANYRUNNING, ==, 0);
+
+    /* Read DCSR: verify cause = HALTREQ (3) */
+    uint32_t dcsr;
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_DCSR, &dcsr));
+    uint32_t cause = (dcsr & DCSR_CAUSE_MASK) >> DCSR_CAUSE_SHIFT;
+    g_assert_cmpuint(cause, ==, DCSR_CAUSE_HALTREQ);
+
+    /* Read DPC: implementation dependent, but it must stay aligned. */
+    uint32_t dpc;
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_DPC, &dpc));
+    g_assert_cmpuint(dpc & 1u, ==, 0);
+
+    /* Resume the CPU */
+    g_assert_true(tcg_resume_hart(qts));
+    status = dm_read(qts, A_DMSTATUS);
+    g_assert_cmpuint(status & DMSTATUS_ALLRESUMEACK, ==,
+                     DMSTATUS_ALLRESUMEACK);
+
+    /* Let it run a bit, then re-halt */
+    g_usleep(TCG_BOOT_US);
+
+    g_assert_true(tcg_halt_hart(qts));
+
+    /* DPC after re-halt is also execution dependent; only assert alignment */
+    uint32_t dpc2;
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_DPC, &dpc2));
+    g_assert_cmpuint(dpc2 & 1u, ==, 0);
+
+    /* DCSR cause should be HALTREQ again */
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_DCSR, &dcsr));
+    cause = (dcsr & DCSR_CAUSE_MASK) >> DCSR_CAUSE_SHIFT;
+    g_assert_cmpuint(cause, ==, DCSR_CAUSE_HALTREQ);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: reset-haltreq and haltreq asserted together.
+ *
+ * Priority per Debug Spec v1.0 Table 4.2 requires reset-haltreq (cause=5)
+ * to win over haltreq (cause=3).
+ */
+static void test_tcg_resethaltreq_priority(void)
+{
+    QTestState *qts = tcg_dm_init();
+    uint32_t status, dcsr, cause;
+
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_SETRESETHALTREQ);
+
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE |
+                               DMCONTROL_HARTRESET | DMCONTROL_HALTREQ);
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+
+    g_assert_true(tcg_wait_for_halt(qts));
+    status = dm_read(qts, A_DMSTATUS);
+    g_assert_cmpuint(status & DMSTATUS_ALLHALTED, ==, DMSTATUS_ALLHALTED);
+
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_DCSR, &dcsr));
+    cause = (dcsr & DCSR_CAUSE_MASK) >> DCSR_CAUSE_SHIFT;
+    g_assert_cmpuint(cause, ==, DCSR_CAUSE_RESET);
+
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE |
+                               DMCONTROL_CLRRESETHALTREQ | DMCONTROL_HALTREQ);
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Read/Write all 32 GPR registers via abstract commands (TCG).
+ *
+ * For each GPR x0..x31:
+ * - x0: hardwired to 0, read should return 0
+ * - x1..x31: write a test pattern, read back and verify
+ */
+static void test_tcg_gpr_rw(void)
+{
+    QTestState *qts = tcg_dm_init();
+
+    g_assert_true(tcg_halt_hart(qts));
+
+    /* x0 is hardwired to 0 */
+    uint32_t val;
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_GPR(0), &val));
+    g_assert_cmpuint(val, ==, 0);
+
+    /* x1..x31: write test patterns and read back */
+    for (int i = 1; i < 32; i++) {
+        uint32_t pattern = 0xA5000000u | (uint32_t)i;
+
+        g_assert_true(tcg_abstract_write_reg(qts, REGNO_GPR(i), pattern));
+        g_assert_true(tcg_abstract_read_reg(qts, REGNO_GPR(i), &val));
+        g_assert_cmpuint(val, ==, pattern);
+    }
+
+    /* Verify x0 is still 0 after all writes */
+    g_assert_true(tcg_abstract_read_reg(qts, REGNO_GPR(0), &val));
+    g_assert_cmpuint(val, ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Read/Write all 32 FPR registers via abstract commands (TCG).
+ *
+ * For each FPR f0..f31:
+ * - Write a 32-bit test pattern (single-precision view)
+ * - Read back and verify
+ */
+static void test_tcg_fpr_rw(void)
+{
+    QTestState *qts = tcg_dm_init();
+
+    g_assert_true(tcg_halt_hart(qts));
+
+    uint32_t val;
+
+    for (int i = 0; i < 32; i++) {
+        uint32_t pattern = 0x3F800000u + (uint32_t)i; /* 1.0f + i */
+
+        g_assert_true(tcg_abstract_write_reg(qts, REGNO_FPR(i), pattern));
+        g_assert_true(tcg_abstract_read_reg(qts, REGNO_FPR(i), &val));
+        g_assert_cmpuint(val, ==, pattern);
+    }
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: RV32 rejects 64-bit GPR abstract accesses at command decode time.
+ */
+static void test_rv32_gpr64_notsup(void)
+{
+    QTestState *qts;
+    uint32_t acs;
+    const char *arch = qtest_get_arch();
+
+    if (!strstr(arch, "32")) {
+        g_test_skip("RV32-only");
+        return;
+    }
+
+    qts = qtest_init("-machine virt");
+
+    dm_set_active(qts);
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    dm_write(qts, A_COMMAND,
+             (0u << 24) | (1u << 17) | (3u << 20) | REGNO_GPR(1));
+
+    acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==, 0);
+    g_assert_cmpuint((acs & ABSTRACTCS_CMDERR_MASK) >>
+                     ABSTRACTCS_CMDERR_SHIFT, ==, 2);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: COMMAND writes are ignored while CMDERR is non-zero.
+ */
+static void test_tcg_command_ignored_on_cmderr(void)
+{
+    QTestState *qts = tcg_dm_init();
+
+    g_assert_true(tcg_halt_hart(qts));
+
+    /* Baseline last command: read x0, result must be 0. */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+    dm_write(qts, A_COMMAND,
+             (0u << 24) | (1u << 17) | (2u << 20) | REGNO_GPR(0));
+    g_assert_true(tcg_wait_for_cmd_done(qts));
+    g_assert_cmpuint(dm_read(qts, A_DATA0), ==, 0);
+
+    /* Latch cmderr with an unsupported command. */
+    dm_write(qts, A_COMMAND, 0xFF000000);
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint((acs & ABSTRACTCS_CMDERR_MASK) >>
+                     ABSTRACTCS_CMDERR_SHIFT, ==, 2);
+
+    /*
+     * This command must be ignored because cmderr != 0.
+     * If it incorrectly overwrites last_cmd, later autoexec will read DCSR.
+     */
+    dm_write(qts, A_COMMAND,
+             (0u << 24) | (1u << 17) | (2u << 20) | REGNO_DCSR);
+
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+    dm_write(qts, A_ABSTRACTAUTO, 0x1);    /* autoexec on data0 */
+    dm_write(qts, A_DATA0, 0xDEADBEEF);    /* triggers autoexec of last_cmd */
+
+    g_assert_true(tcg_wait_for_cmd_done(qts));
+    acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint((acs & ABSTRACTCS_CMDERR_MASK) >>
+                     ABSTRACTCS_CMDERR_SHIFT, ==, 2);
+    g_assert_cmpuint(dm_read(qts, A_DATA0), ==, 0xDEADBEEF);
+
+    qtest_quit(qts);
+}
+
 
 /*
  * Test: Halt and resume cycle via ROM simulation.
@@ -1007,6 +1352,16 @@ int main(int argc, char *argv[])
     qtest_add_func("/riscv-dm/abstract-cmd-flow", test_abstract_cmd_flow);
     qtest_add_func("/riscv-dm/abstract-cmd-exception",
                    test_abstract_cmd_exception);
+
+    /* TCG-mode tests: real CPU execution */
+    qtest_add_func("/riscv-dm/tcg/halt-dpc", test_tcg_halt_dpc);
+    qtest_add_func("/riscv-dm/tcg/resethaltreq-priority",
+                   test_tcg_resethaltreq_priority);
+    qtest_add_func("/riscv-dm/tcg/gpr-rw", test_tcg_gpr_rw);
+    qtest_add_func("/riscv-dm/tcg/fpr-rw", test_tcg_fpr_rw);
+    qtest_add_func("/riscv-dm/rv32-gpr64-notsup", test_rv32_gpr64_notsup);
+    qtest_add_func("/riscv-dm/tcg/command-ignored-on-cmderr",
+                   test_tcg_command_ignored_on_cmderr);
 
     return g_test_run();
 }
