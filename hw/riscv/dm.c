@@ -19,6 +19,7 @@
 #include "exec/cpu-common.h"
 #include "migration/vmstate.h"
 #include "exec/translation-block.h"
+#include "system/address-spaces.h"
 #include "system/tcg.h"
 #include "target/riscv/cpu.h"
 #include "trace.h"
@@ -736,6 +737,95 @@ static bool dm_execute_abstract_cmd(RISCVDMState *s, uint32_t command)
 }
 
 
+static int dm_sba_access_bytes(uint32_t sbaccess)
+{
+    if (sbaccess <= 4) {
+        return 1 << sbaccess;
+    }
+    return 0;
+}
+
+static bool dm_sba_access_supported(RISCVDMState *s, uint32_t sbaccess)
+{
+    switch (sbaccess) {
+    case 0: return ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS8);
+    case 1: return ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS16);
+    case 2: return ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS32);
+    case 3: return ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS64);
+    case 4: return ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS128);
+    default: return false;
+    }
+}
+
+static void dm_sba_execute(RISCVDMState *s, bool is_write)
+{
+    uint32_t sbaccess = ARRAY_FIELD_EX32(s->regs, SBCS, SBACCESS);
+    int access_bytes = dm_sba_access_bytes(sbaccess);
+    uint8_t buf[16] = { 0 };
+    MemTxResult result;
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSYERROR) ||
+        ARRAY_FIELD_EX32(s->regs, SBCS, SBERROR)) {
+        return;
+    }
+
+    if (!access_bytes || !dm_sba_access_supported(s, sbaccess)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBERROR, 4); /* other error */
+        return;
+    }
+
+    if (s->regs[R_SBADDRESS2] || s->regs[R_SBADDRESS3]) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBERROR, 2);
+        return;
+    }
+
+    hwaddr lo = s->regs[R_SBADDRESS0];
+    hwaddr hi = s->regs[R_SBADDRESS1];
+    hwaddr addr = (hi << 32) | lo;
+
+    if (addr & (access_bytes - 1)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBERROR, 3); /* alignment */
+        return;
+    }
+
+    ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSY, 1);
+    for (int i = 0; i < 4; i++) {
+        stl_le_p(buf + i * 4, s->regs[R_SBDATA0 + i]);
+    }
+
+    if (is_write) {
+        result = address_space_rw(&address_space_memory, addr,
+                                  MEMTXATTRS_UNSPECIFIED, buf,
+                                  access_bytes, true);
+    } else {
+        result = address_space_rw(&address_space_memory, addr,
+                                  MEMTXATTRS_UNSPECIFIED, buf,
+                                  access_bytes, false);
+        if (result == MEMTX_OK) {
+            for (int i = 0; i < 4; i++) {
+                s->regs[R_SBDATA0 + i] = ldl_le_p(buf + i * 4);
+            }
+        }
+    }
+
+    if (result != MEMTX_OK) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBERROR,
+                         result == MEMTX_DECODE_ERROR ? 2 : 7);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSY, 0);
+        return;
+    }
+
+    trace_riscv_dm_sba_access(addr, s->regs[R_SBDATA0], access_bytes, is_write);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBAUTOINCREMENT)) {
+        addr += access_bytes;
+        s->regs[R_SBADDRESS0] = (uint32_t)addr;
+        s->regs[R_SBADDRESS1] = addr >> 32;
+    }
+
+    ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSY, 0);
+}
+
 
 static void dm_status_refresh(RISCVDMState *s)
 {
@@ -1108,6 +1198,129 @@ static uint64_t dm_progbuf_post_read(RegisterInfo *reg, uint64_t val)
     return val;
 }
 
+static uint64_t dm_sbcs_pre_write(RegisterInfo *reg, uint64_t val64)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+    uint32_t val = (uint32_t)val64;
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "riscv-dm: write to sbcs while busy\n");
+        return s->regs[R_SBCS];
+    }
+
+    uint32_t cur = s->regs[R_SBCS];
+
+    /* W1C: sberror and sbbusyerror */
+    uint32_t sberror_clr = FIELD_EX32(val, SBCS, SBERROR);
+    uint32_t sberror_cur = FIELD_EX32(cur, SBCS, SBERROR);
+    cur = FIELD_DP32(cur, SBCS, SBERROR, sberror_cur & ~sberror_clr);
+
+    uint32_t busyerr_clr = FIELD_EX32(val, SBCS, SBBUSYERROR);
+    uint32_t busyerr_cur = FIELD_EX32(cur, SBCS, SBBUSYERROR);
+    cur = FIELD_DP32(cur, SBCS, SBBUSYERROR, busyerr_cur & ~busyerr_clr);
+
+    /* Writable fields */
+    cur = FIELD_DP32(cur, SBCS, SBREADONADDR,
+                     FIELD_EX32(val, SBCS, SBREADONADDR));
+    cur = FIELD_DP32(cur, SBCS, SBACCESS,
+                     FIELD_EX32(val, SBCS, SBACCESS));
+    cur = FIELD_DP32(cur, SBCS, SBAUTOINCREMENT,
+                     FIELD_EX32(val, SBCS, SBAUTOINCREMENT));
+    cur = FIELD_DP32(cur, SBCS, SBREADONDATA,
+                     FIELD_EX32(val, SBCS, SBREADONDATA));
+
+    return cur;
+}
+
+static void dm_sbaddress0_post_write(RegisterInfo *reg, uint64_t val64)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+        return;
+    }
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBREADONADDR) &&
+        !ARRAY_FIELD_EX32(s->regs, SBCS, SBERROR) &&
+        !ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSYERROR)) {
+        dm_sba_execute(s, false);
+    }
+}
+
+static uint64_t dm_sbaddress1_pre_write(RegisterInfo *reg, uint64_t val64)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+        return s->regs[R_SBADDRESS1];
+    }
+    return (uint32_t)val64;
+}
+
+static void dm_sbdata0_post_write(RegisterInfo *reg, uint64_t val64)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+        return;
+    }
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSYERROR) ||
+        ARRAY_FIELD_EX32(s->regs, SBCS, SBERROR)) {
+        return;
+    }
+
+    dm_sba_execute(s, true);
+}
+
+static uint64_t dm_sbdata0_post_read(RegisterInfo *reg, uint64_t val)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+        return val;
+    }
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSYERROR) ||
+        ARRAY_FIELD_EX32(s->regs, SBCS, SBERROR)) {
+        return val;
+    }
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBREADONDATA)) {
+        dm_sba_execute(s, false);
+        return val;
+    }
+    return val;
+}
+
+static uint64_t dm_sbdata1_pre_write(RegisterInfo *reg, uint64_t val64)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+        return s->regs[R_SBDATA1];
+    }
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSYERROR) ||
+        ARRAY_FIELD_EX32(s->regs, SBCS, SBERROR)) {
+        return s->regs[R_SBDATA1];
+    }
+    return (uint32_t)val64;
+}
+
+static uint64_t dm_sbdata_hi_post_read(RegisterInfo *reg, uint64_t val)
+{
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+
+    if (ARRAY_FIELD_EX32(s->regs, SBCS, SBBUSY)) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBBUSYERROR, 1);
+    }
+    return val;
+}
+
 static uint64_t dm_haltsum0_post_read(RegisterInfo *reg, uint64_t val)
 {
     RISCVDMState *s = RISCV_DM(reg->opaque);
@@ -1287,20 +1500,31 @@ static RegisterAccessInfo riscv_dm_regs_info[] = {
       .ro = R_SBCS_SBACCESS8_MASK | R_SBCS_SBACCESS16_MASK |
             R_SBCS_SBACCESS32_MASK | R_SBCS_SBACCESS64_MASK |
             R_SBCS_SBACCESS128_MASK | R_SBCS_SBASIZE_MASK |
-            R_SBCS_SBBUSY_MASK | R_SBCS_SBVERSION_MASK, },
+            R_SBCS_SBBUSY_MASK | R_SBCS_SBVERSION_MASK,
+      .pre_write = dm_sbcs_pre_write, },
 
-    { .name = "SBADDRESS0", .addr = A_SBADDRESS0, },
+    { .name = "SBADDRESS0", .addr = A_SBADDRESS0,
+      .post_write = dm_sbaddress0_post_write, },
 
-    { .name = "SBADDRESS1", .addr = A_SBADDRESS1, },
+    { .name = "SBADDRESS1", .addr = A_SBADDRESS1,
+      .pre_write = dm_sbaddress1_pre_write, },
 
     { .name = "SBADDRESS2", .addr = A_SBADDRESS2, },
 
-    { .name = "SBDATA0", .addr = A_SBDATA0, },
+    { .name = "SBDATA0", .addr = A_SBDATA0,
+      .post_write = dm_sbdata0_post_write,
+      .post_read = dm_sbdata0_post_read, },
 
-    { .name = "SBDATA1", .addr = A_SBDATA1, },
+    { .name = "SBDATA1", .addr = A_SBDATA1,
+      .pre_write = dm_sbdata1_pre_write,
+      .post_read = dm_sbdata_hi_post_read, },
 
-    { .name = "SBDATA2", .addr = A_SBDATA2, },
-    { .name = "SBDATA3", .addr = A_SBDATA3, },
+    { .name = "SBDATA2", .addr = A_SBDATA2,
+      .pre_write = dm_sbdata1_pre_write,
+      .post_read = dm_sbdata_hi_post_read, },
+    { .name = "SBDATA3", .addr = A_SBDATA3,
+      .pre_write = dm_sbdata1_pre_write,
+      .post_read = dm_sbdata_hi_post_read, },
 
     { .name = "HALTSUM0", .addr = A_HALTSUM0,
       .ro = 0xFFFFFFFF,
@@ -1601,6 +1825,17 @@ static void dm_debug_reset(RISCVDMState *s)
 
     ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, DATACOUNT, s->num_abstract_data);
     ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, PROGBUFSIZE, s->progbuf_size);
+
+    /* SBA capabilities */
+    if (s->sba_addr_width > 0) {
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBACCESS8, 1);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBACCESS16, 1);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBACCESS32, 1);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBACCESS64, 1);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBASIZE, s->sba_addr_width);
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBACCESS, 2); /* default 32-bit */
+        ARRAY_FIELD_DP32(s->regs, SBCS, SBVERSION, 1);
+    }
 
     /* Reset per-hart state */
     if (s->hart_resumeack && s->num_harts > 0) {
