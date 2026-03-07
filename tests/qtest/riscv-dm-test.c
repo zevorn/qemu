@@ -195,6 +195,24 @@ static void sim_cpu_resume_ack(QTestState *qts, uint32_t hartid)
     rom_write32(qts, ROM_RESUME, hartid);
 }
 
+/*
+ * Simulate the CPU executing the GOING acknowledgment.
+ * ROM code: detects GOING flag -> writes 0 to GOING offset -> jumps to cmd.
+ */
+static void sim_cpu_going_ack(QTestState *qts)
+{
+    rom_write32(qts, ROM_GOING, 0);
+}
+
+/*
+ * Simulate CPU hitting exception during abstract command.
+ * ROM exception handler writes 0 to EXCP offset.
+ */
+static void sim_cpu_exception(QTestState *qts)
+{
+    rom_write32(qts, ROM_EXCP, 0);
+}
+
 
 /*
  * Test: dmactive gate.
@@ -627,6 +645,410 @@ static void test_ackhavereset(void)
 }
 
 /*
+ * Test: Unsupported register numbers report CMDERR=EXCEPTION.
+ */
+static void test_invalid_regno_exception(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    uint32_t cmd, acs, cmderr;
+
+    dm_set_active(qts);
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    cmd = (0u << 24) | (1u << 17) | (2u << 20) | 0x1040u;
+    dm_write(qts, A_COMMAND, cmd);
+
+    acs = dm_read(qts, A_ABSTRACTCS);
+    cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 3);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: ABSTRACTAUTO read/write.
+ */
+static void test_abstractauto(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Write autoexec pattern */
+    dm_write(qts, A_ABSTRACTAUTO, 0x00030003);
+    g_assert_cmpuint(dm_read(qts, A_ABSTRACTAUTO), ==, 0x00030003);
+
+    /* Clear */
+    dm_write(qts, A_ABSTRACTAUTO, 0);
+    g_assert_cmpuint(dm_read(qts, A_ABSTRACTAUTO), ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: COMMAND write when hart is not halted should set CMDERR.
+ */
+static void test_command_not_halted(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Clear any existing CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /*
+     * Issue Access Register command (cmdtype=0, transfer=1, regno=0x1000)
+     * to a running hart. Should fail with HALTRESUME error (4).
+     */
+    uint32_t cmd = (0u << 24) |     /* cmdtype = Access Register */
+                   (1u << 17) |     /* transfer = 1 */
+                   (2u << 20) |     /* aarsize = 32-bit */
+                   0x1000;          /* regno = x0 */
+    dm_write(qts, A_COMMAND, cmd);
+
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    uint32_t cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    /* HALTRESUME error = 4 */
+    g_assert_cmpuint(cmderr, ==, 4);
+
+    /* Clear CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+    acs = dm_read(qts, A_ABSTRACTCS);
+    cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Abstract command execution flow (Access Register).
+ *
+ * With hart halted, issue an Access Register command:
+ * 1. Hart must be halted first
+ * 2. Write COMMAND -> DM sets BUSY=1, writes instructions to CMD space,
+ *    sets FLAGS=GOING
+ * 3. Hart can keep reporting HALTED in the park loop before consuming GO
+ * 4. CPU ROM detects GOING -> writes to GOING offset (ack) -> jumps to cmd
+ * 5. CPU executes cmd -> hits ebreak -> re-enters ROM -> writes HARTID
+ * 6. DM only completes after the selected hart returns to the park loop
+ */
+static void test_abstract_cmd_flow(void)
+{
+    QTestState *qts = qtest_init("-machine virt -smp 2");
+    dm_set_active(qts);
+
+    /* Halt both harts first. */
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+    sim_cpu_halt_ack(qts, 1);
+
+    uint32_t status = dm_read(qts, A_DMSTATUS);
+    g_assert_cmpuint(status & DMSTATUS_ALLHALTED, ==, DMSTATUS_ALLHALTED);
+
+    /* Clear any latched CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /*
+     * Issue Access Register command:
+     * cmdtype=0 (Access Register), transfer=1, write=0 (read),
+     * aarsize=2 (32-bit), regno=0x1000 (x0)
+     */
+    uint32_t cmd = (0u << 24) |     /* cmdtype = Access Register */
+                   (1u << 17) |     /* transfer = 1 */
+                   (2u << 20) |     /* aarsize = 32-bit */
+                   0x1000;          /* regno = x0 */
+    dm_write(qts, A_COMMAND, cmd);
+
+    /* BUSY should be set */
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==, ABSTRACTCS_BUSY);
+
+    /*
+     * A different halted hart must not complete the command, and the selected
+     * hart must not complete it before GO has been consumed.
+     */
+    sim_cpu_halt_ack(qts, 1);
+    g_assert_cmpuint(dm_read(qts, A_ABSTRACTCS) & ABSTRACTCS_BUSY, ==,
+                     ABSTRACTCS_BUSY);
+    sim_cpu_halt_ack(qts, 0);
+    g_assert_cmpuint(dm_read(qts, A_ABSTRACTCS) & ABSTRACTCS_BUSY, ==,
+                     ABSTRACTCS_BUSY);
+
+    /* Simulate CPU: ROM detects GOING flag -> writes GOING ack. */
+    sim_cpu_going_ack(qts);
+
+    /* Simulate CPU: execute cmd, hit ebreak, then re-enter ROM. */
+    sim_cpu_halt_ack(qts, 0);
+
+    /* BUSY should be cleared, no error */
+    acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==, 0);
+    uint32_t cmderr =
+        (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Abstract command exception path.
+ *
+ * When CPU hits an exception during abstract cmd execution:
+ * 1. ROM exception handler writes to EXCP offset
+ * 2. DM latches CMDERR=EXCEPTION(3) and stays busy until the hart parks again
+ * 3. CPU ebreak -> re-enters ROM -> writes HARTID (re-halt)
+ */
+static void test_abstract_cmd_exception(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Halt hart 0 */
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Clear CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /* Issue Access Register command */
+    uint32_t cmd = (0u << 24) | (1u << 17) | (2u << 20) | 0x1000;
+    dm_write(qts, A_COMMAND, cmd);
+
+    g_assert_cmpuint(dm_read(qts, A_ABSTRACTCS) & ABSTRACTCS_BUSY, ==,
+                     ABSTRACTCS_BUSY);
+
+    /* CPU acknowledges going */
+    sim_cpu_going_ack(qts);
+
+    /* CPU hits exception during cmd execution -> ROM exception handler */
+    sim_cpu_exception(qts);
+
+    /* BUSY stays set until the hart re-enters the park loop. */
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==, ABSTRACTCS_BUSY);
+    uint32_t cmderr =
+        (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 3);  /* EXCEPTION */
+
+    /* CPU ebreak in exception handler -> re-enters ROM -> writes HARTID */
+    sim_cpu_halt_ack(qts, 0);
+
+    acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==, 0);
+
+    /* Hart should still be halted */
+    uint32_t st = dm_read(qts, A_DMSTATUS);
+    g_assert_cmpuint(st & DMSTATUS_ALLHALTED, ==, DMSTATUS_ALLHALTED);
+
+    /* Clear CMDERR for cleanup */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+    acs = dm_read(qts, A_ABSTRACTCS);
+    cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Unsupported command types (Quick Access, Access Memory)
+ * should return CMDERR=2 (NOTSUP).
+ */
+static void test_unsupported_cmdtype(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Halt hart 0 */
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Clear any existing CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /* cmdtype=1 (Quick Access) should return CMDERR=2 (NOTSUP) */
+    dm_write(qts, A_COMMAND, (1u << 24));
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    uint32_t cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 2);
+
+    /* Clear CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /* cmdtype=2 (Access Memory) should return CMDERR=2 (NOTSUP) */
+    dm_write(qts, A_COMMAND, (2u << 24));
+    acs = dm_read(qts, A_ABSTRACTCS);
+    cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 2);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: Commands are silently ignored when CMDERR is already set.
+ */
+static void test_command_ignored_when_cmderr(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Halt hart 0 */
+    dm_write(qts, A_DMCONTROL, DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Trigger a cmderr via unsupported cmdtype */
+    dm_write(qts, A_COMMAND, (1u << 24));
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    uint32_t cmderr = (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, !=, 0);
+
+    /* Issue a valid command -- should be ignored while cmderr is set */
+    uint32_t valid_cmd = (0u << 24) |   /* cmdtype = Access Register */
+                         (1u << 17) |   /* transfer = 1 */
+                         (2u << 20) |   /* aarsize = 32-bit */
+                         0x1001;        /* regno = x1 */
+    dm_write(qts, A_COMMAND, valid_cmd);
+
+    /* cmderr should remain unchanged (not cleared, not overwritten) */
+    uint32_t acs2 = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmphex(acs2, ==, acs);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: ABSTRACTAUTO PROGBUF0 triggers auto re-execution.
+ */
+static void test_abstractauto_progbuf(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Halt hart 0 */
+    dm_write(qts, A_DMCONTROL,
+             DMCONTROL_DMACTIVE | DMCONTROL_HALTREQ);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Clear CMDERR */
+    dm_write(qts, A_ABSTRACTCS, ABSTRACTCS_CMDERR_MASK);
+
+    /* Issue a valid command to establish last_cmd */
+    uint32_t cmd = (0u << 24) | (1u << 17) |
+                   (2u << 20) | 0x1001;
+    dm_write(qts, A_COMMAND, cmd);
+
+    /* Ack: GOING then re-enter park loop */
+    sim_cpu_going_ack(qts);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Enable autoexec on PROGBUF0 (bit 16) */
+    dm_write(qts, A_ABSTRACTAUTO, (1u << 16));
+
+    /* Write PROGBUF0 -> should trigger auto re-execution */
+    dm_write(qts, A_PROGBUF0, 0x00100073);  /* ebreak */
+
+    /* Command re-issued: BUSY should be set */
+    uint32_t acs = dm_read(qts, A_ABSTRACTCS);
+    g_assert_cmpuint(acs & ABSTRACTCS_BUSY, ==,
+                     ABSTRACTCS_BUSY);
+
+    /* Ack the auto-executed command */
+    sim_cpu_going_ack(qts);
+    sim_cpu_halt_ack(qts, 0);
+
+    /* Verify no error */
+    acs = dm_read(qts, A_ABSTRACTCS);
+    uint32_t cmderr =
+        (acs & ABSTRACTCS_CMDERR_MASK) >> ABSTRACTCS_CMDERR_SHIFT;
+    g_assert_cmpuint(cmderr, ==, 0);
+
+    /* Disable autoexec */
+    dm_write(qts, A_ABSTRACTAUTO, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * Test: HAWINDOWSEL and HAWINDOW read/write.
+ */
+static void test_hawindow(void)
+{
+    QTestState *qts = qtest_init("-machine virt");
+    dm_set_active(qts);
+
+    /* Select window 0 */
+    dm_write(qts, A_HAWINDOWSEL, 0);
+    g_assert_cmpuint(dm_read(qts, A_HAWINDOWSEL), ==, 0);
+
+    /* Write a mask to HAWINDOW */
+    dm_write(qts, A_HAWINDOW, 0x5);
+    g_assert_cmpuint(dm_read(qts, A_HAWINDOW), ==, 0x5);
+
+    /* Clear */
+    dm_write(qts, A_HAWINDOW, 0);
+    g_assert_cmpuint(dm_read(qts, A_HAWINDOW), ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: HALTSUM0 window follows hartsel[19:5].
+ */
+static void test_haltsum0_window(void)
+{
+    QTestState *qts = qtest_init("-machine virt -smp 64");
+    dm_set_active(qts);
+
+    /* Mark hart 40 halted. */
+    sim_cpu_halt_ack(qts, 40);
+
+    /* Window base 0: hart 40 is out of range 0..31. */
+    dm_write(qts, A_DMCONTROL,
+             DMCONTROL_DMACTIVE | (0u << DMCONTROL_HARTSELLO_SHIFT));
+    g_assert_cmpuint(dm_read(qts, A_HALTSUM0), ==, 0);
+
+    /* Window base 32: hart 40 maps to bit 8. */
+    dm_write(qts, A_DMCONTROL,
+             DMCONTROL_DMACTIVE | (32u << DMCONTROL_HARTSELLO_SHIFT));
+    g_assert_cmpuint(dm_read(qts, A_HALTSUM0), ==, (1u << 8));
+
+    qtest_quit(qts);
+}
+
+/*
+ * Test: HALTSUM1 window follows hartsel[19:10].
+ */
+static void test_haltsum1_window(void)
+{
+    QTestState *qts = qtest_init("-machine virt -smp 64");
+
+    dm_set_active(qts);
+
+    sim_cpu_halt_ack(qts, 33);
+
+    g_assert_cmpuint(dm_read(qts, A_HALTSUM1), ==, (1u << 1));
+
+    dm_write(qts, A_DMCONTROL,
+             DMCONTROL_DMACTIVE | (1u << DMCONTROL_HARTSELHI_SHIFT));
+    g_assert_cmpuint(dm_read(qts, A_HALTSUM1), ==, 0);
+
+    qtest_quit(qts);
+}
+
+/* TCG-mode tests: real CPU execution. */
+
+/*
+ * Test: Halt CPU with TCG and verify DPC/DCSR.
+ *
+ * With real CPU execution:
+ * 1. Boot CPU, let it run briefly
+ * 2. Send HALTREQ -> CPU enters debug mode
+ * 3. Read DCSR via abstract command -> verify cause = HALTREQ (3)
+ * 4. Read DPC via abstract command -> verify it's a valid address
+ * 5. Resume CPU, then re-halt to verify the cycle works
+ */
+
+/*
  * Test: Halt and resume cycle via ROM simulation.
  *
  * Simulates the full halt/resume flow:
@@ -806,11 +1228,27 @@ int main(int argc, char *argv[])
     qtest_add_func("/riscv-dm/optional-regs-absent", test_optional_regs_absent);
     qtest_add_func("/riscv-dm/deactivate", test_deactivate);
     qtest_add_func("/riscv-dm/ackhavereset", test_ackhavereset);
+    qtest_add_func("/riscv-dm/abstractauto", test_abstractauto);
+    qtest_add_func("/riscv-dm/command-not-halted", test_command_not_halted);
+    qtest_add_func("/riscv-dm/invalid-regno-exception",
+                   test_invalid_regno_exception);
+    qtest_add_func("/riscv-dm/hawindow", test_hawindow);
+    qtest_add_func("/riscv-dm/haltsum0-window", test_haltsum0_window);
+    qtest_add_func("/riscv-dm/haltsum1-window", test_haltsum1_window);
     qtest_add_func("/riscv-dm/halt-resume", test_halt_resume);
     qtest_add_func("/riscv-dm/hawindow-multi-halt-resume",
                    test_hawindow_multi_halt_resume);
     qtest_add_func("/riscv-dm/sba-sticky-error",
                    test_sba_sticky_error);
+    qtest_add_func("/riscv-dm/abstract-cmd-flow", test_abstract_cmd_flow);
+    qtest_add_func("/riscv-dm/abstract-cmd-exception",
+                   test_abstract_cmd_exception);
+    qtest_add_func("/riscv-dm/unsupported-cmdtype",
+                   test_unsupported_cmdtype);
+    qtest_add_func("/riscv-dm/command-ignored-when-cmderr",
+                   test_command_ignored_when_cmderr);
+    qtest_add_func("/riscv-dm/abstractauto-progbuf",
+                   test_abstractauto_progbuf);
 
     return g_test_run();
 }
