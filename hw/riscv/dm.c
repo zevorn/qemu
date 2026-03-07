@@ -336,6 +336,18 @@ static inline bool dm_ndmreset_active(RISCVDMState *s)
     return ARRAY_FIELD_EX32(s->regs, DMCONTROL, NDMRESET);
 }
 
+static RISCVCPU *dm_get_cpu(RISCVDMState *s, uint32_t hartsel)
+{
+    CPUState *cs;
+
+    if (!dm_hart_valid(s, hartsel)) {
+        return NULL;
+    }
+
+    cs = qemu_get_cpu(hartsel);
+    return cs ? RISCV_CPU(cs) : NULL;
+}
+
 static bool dm_abstract_cmd_completed(RISCVDMState *s, uint32_t hartsel)
 {
     uint32_t selected = dm_get_hartsel(s);
@@ -545,6 +557,185 @@ static inline void dm_set_cmderr(RISCVDMState *s, uint32_t err)
         ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, CMDERR, err);
     }
 }
+static void dm_execute_access_register(RISCVDMState *s, uint32_t command)
+{
+    uint32_t regno     = FIELD_EX32(command, COMMAND, REGNO);
+    bool     write     = FIELD_EX32(command, COMMAND, WRITE);
+    bool     transfer  = FIELD_EX32(command, COMMAND, TRANSFER);
+    bool     postexec  = FIELD_EX32(command, COMMAND, POSTEXEC);
+    bool     aarpostinc = FIELD_EX32(command, COMMAND, AARPOSTINCREMENT);
+    uint32_t aarsize   = FIELD_EX32(command, COMMAND, AARSIZE);
+
+    uint32_t hartsel = dm_get_hartsel(s);
+    RISCVCPU *cpu = dm_get_cpu(s, hartsel);
+    bool csr_hit = (regno <= RISCV_DM_REGNO_CSR_END);
+    bool gpr_hit = (regno >= RISCV_DM_REGNO_GPR_START &&
+                    regno <= RISCV_DM_REGNO_GPR_END);
+    bool fpr_hit = (regno >= RISCV_DM_REGNO_FPR_START &&
+                    regno <= RISCV_DM_REGNO_FPR_END);
+    uint32_t max_aarsize = 0;
+
+    /* Hart must be halted */
+    if (!dm_hart_valid(s, hartsel) || !s->hart_halted[hartsel]) {
+        dm_set_cmderr(s, RISCV_DM_CMDERR_HALTRESUME);
+        trace_riscv_dm_abstract_cmd_rejected("hart_not_halted",
+            ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+        return;
+    }
+
+    if (!cpu) {
+        dm_set_cmderr(s, RISCV_DM_CMDERR_HALTRESUME);
+        trace_riscv_dm_abstract_cmd_rejected("hart_unavailable",
+            ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+        return;
+    }
+
+    dm_flush_cmd_space(s);
+
+    if (transfer) {
+        if (csr_hit || gpr_hit) {
+            max_aarsize = riscv_cpu_mxl(&cpu->env) == MXL_RV32 ? 2 : 3;
+        } else if (fpr_hit) {
+            if (riscv_has_ext(&cpu->env, RVD)) {
+                max_aarsize = 3;
+            } else if (riscv_has_ext(&cpu->env, RVF)) {
+                max_aarsize = 2;
+            }
+        }
+
+        if ((csr_hit || gpr_hit || fpr_hit) &&
+            (aarsize < 2 || aarsize > max_aarsize)) {
+            dm_set_cmderr(s, RISCV_DM_CMDERR_NOTSUP);
+            trace_riscv_dm_abstract_cmd_rejected("unsupported_aarsize",
+                ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+            return;
+        }
+
+        if (!write) {
+            /* Read: copy register -> data */
+            if (csr_hit) {
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                               DM_CSRR(regno & 0xFFF));
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 3 * 4,
+                               DM_DATA_STORE(8, aarsize));
+            } else if (gpr_hit) {
+                if ((regno & 0x1F) == 8) {
+                    /*
+                     * GPR 8 (s0) is used as a scratch register by the ROM.
+                     * Read the architected x8 value from dscratch0 first.
+                     */
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                                   DM_CSRR(0x7b2));
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 3 * 4,
+                                   DM_DATA_STORE(8, aarsize));
+                } else {
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                                   DM_DATA_STORE(regno & 0x1F, aarsize));
+                }
+            } else if (fpr_hit) {
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                               DM_DATA_FP_STORE(regno & 0x1F, aarsize));
+            } else {
+                dm_set_cmderr(s, RISCV_DM_CMDERR_EXCEPTION);
+                trace_riscv_dm_abstract_cmd_rejected("unsupported_regno_read",
+                    ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+                return;
+            }
+        } else {
+            /* Write: copy data -> register */
+            if (csr_hit) {
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                               DM_DATA_LOAD(8, aarsize));
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 3 * 4,
+                               DM_CSRW(regno & 0xFFF));
+            } else if (gpr_hit) {
+                if ((regno & 0x1F) == 8) {
+                    /* GPR 8 (s0) is saved in dscratch0 */
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                                   DM_DATA_LOAD(8, aarsize));
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 3 * 4,
+                                   DM_CSRW(0x7b2));
+                } else {
+                    dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                                   DM_DATA_LOAD(regno & 0x1F, aarsize));
+                }
+            } else if (fpr_hit) {
+                dm_rom_write32(s, RISCV_DM_ROM_CMD + 2 * 4,
+                               DM_DATA_FP_LOAD(regno & 0x1F, aarsize));
+            } else {
+                dm_set_cmderr(s, RISCV_DM_CMDERR_EXCEPTION);
+                trace_riscv_dm_abstract_cmd_rejected("unsupported_regno_write",
+                    ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+                return;
+            }
+        }
+    }
+
+    /* Post-increment */
+    if (aarpostinc && transfer) {
+        s->last_cmd = FIELD_DP32(command, COMMAND, REGNO, regno + 1);
+    }
+
+    if (postexec) {
+        if (s->progbuf_size == 0) {
+            dm_set_cmderr(s, RISCV_DM_CMDERR_NOTSUP);
+            trace_riscv_dm_abstract_cmd_rejected("postexec_without_progbuf",
+                ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+            return;
+        }
+
+        /* Restore s0 first, then continue with Program Buffer. */
+        dm_rom_write32(s, RISCV_DM_ROM_CMD + 9 * 4, DM_JAL(2));
+    }
+
+    dm_invalidate_dynamic_code(s);
+
+    /* Set BUSY */
+    ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, BUSY, 1);
+
+    /* Set FLAGS to going and signal hart */
+    dm_rom_write8(s, RISCV_DM_ROM_FLAGS + hartsel, RISCV_DM_FLAG_GOING);
+
+    trace_riscv_dm_abstract_cmd_submit(
+        FIELD_EX32(command, COMMAND, CMDTYPE), regno, transfer,
+        write, aarpostinc, postexec);
+}
+
+static bool dm_execute_abstract_cmd(RISCVDMState *s, uint32_t command)
+{
+    uint32_t cmderr = ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR);
+
+    /* If cmderr is latched, reject silently */
+    if (cmderr != RISCV_DM_CMDERR_NONE) {
+        trace_riscv_dm_abstract_cmd_rejected("cmderr_latched", cmderr);
+        return false;
+    }
+
+    /* If busy, set cmderr=busy */
+    if (ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, BUSY)) {
+        dm_set_cmderr(s, RISCV_DM_CMDERR_BUSY);
+        trace_riscv_dm_abstract_cmd_rejected("command_while_busy",
+            ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+        return false;
+    }
+
+    uint32_t cmdtype = FIELD_EX32(command, COMMAND, CMDTYPE);
+
+    switch (cmdtype) {
+    case RISCV_DM_CMD_ACCESS_REG:
+        dm_execute_access_register(s, command);
+        break;
+    default:
+        dm_set_cmderr(s, RISCV_DM_CMDERR_NOTSUP);
+        trace_riscv_dm_abstract_cmd_rejected("unsupported_cmdtype",
+            ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR));
+        break;
+    }
+
+    return true;
+}
+
+
 
 static void dm_status_refresh(RISCVDMState *s)
 {
@@ -805,9 +996,13 @@ static uint64_t dm_abstractcs_pre_write(RegisterInfo *reg, uint64_t val64)
 static uint64_t dm_command_pre_write(RegisterInfo *reg, uint64_t val64)
 {
     RISCVDMState *s = RISCV_DM(reg->opaque);
+    uint32_t command = (uint32_t)val64;
 
-    /* Stub: abstract command execution added in a follow-on patch. */
-    s->last_cmd = (uint32_t)val64;
+    if (dm_execute_abstract_cmd(s, command)) {
+        s->last_cmd = command;
+    }
+
+    /* COMMAND is WARZ: keep internal state, but reads always return 0. */
     return s->regs[R_COMMAND];
 }
 
@@ -825,7 +1020,6 @@ static uint64_t dm_abstractauto_pre_write(RegisterInfo *reg, uint64_t val64)
         return s->regs[R_ABSTRACTAUTO];
     }
 
-    /* Stub: autoexec trigger logic added in a follow-on patch. */
     uint32_t data_count = MIN(s->num_abstract_data, 12);
     uint32_t pbuf_size = MIN(s->progbuf_size, 16);
     uint32_t data_mask = data_count ? ((1u << data_count) - 1u) : 0;
@@ -833,6 +1027,27 @@ static uint64_t dm_abstractauto_pre_write(RegisterInfo *reg, uint64_t val64)
     uint32_t mask = data_mask | (pbuf_mask << 16);
 
     return (uint32_t)val64 & mask;
+}
+
+static void dm_check_autoexec(RISCVDMState *s, bool is_data, int index)
+{
+    if (ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, BUSY)) {
+        dm_set_cmderr(s, RISCV_DM_CMDERR_BUSY);
+        return;
+    }
+
+    uint32_t autoexec = s->regs[R_ABSTRACTAUTO];
+    bool trigger;
+
+    if (is_data) {
+        trigger = (autoexec >> index) & 1;
+    } else {
+        trigger = (autoexec >> (16 + index)) & 1;
+    }
+
+    if (trigger) {
+        dm_execute_abstract_cmd(s, s->last_cmd);
+    }
 }
 
 static uint64_t dm_data_pre_write(RegisterInfo *reg, uint64_t val64)
@@ -852,10 +1067,15 @@ static void dm_data_post_write(RegisterInfo *reg, uint64_t val64)
     int index = (reg->access->addr - A_DATA0) / 4;
 
     dm_sync_data_to_rom(s, index);
+    dm_check_autoexec(s, true, index);
 }
 
 static uint64_t dm_data_post_read(RegisterInfo *reg, uint64_t val)
 {
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+    int index = (reg->access->addr - A_DATA0) / 4;
+
+    dm_check_autoexec(s, true, index);
     return val;
 }
 
@@ -876,10 +1096,15 @@ static void dm_progbuf_post_write(RegisterInfo *reg, uint64_t val64)
     int index = (reg->access->addr - A_PROGBUF0) / 4;
 
     dm_sync_progbuf_to_rom(s, index);
+    dm_check_autoexec(s, false, index);
 }
 
 static uint64_t dm_progbuf_post_read(RegisterInfo *reg, uint64_t val)
 {
+    RISCVDMState *s = RISCV_DM(reg->opaque);
+    int index = (reg->access->addr - A_PROGBUF0) / 4;
+
+    dm_check_autoexec(s, false, index);
     return val;
 }
 
