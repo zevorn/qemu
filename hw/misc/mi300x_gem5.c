@@ -34,35 +34,22 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/blocker.h"
 #include "hw/misc/mi300x_gem5.h"
+#include "trace.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
 
-/* #define MI300X_DEBUG */
-
-#ifdef MI300X_DEBUG
-#define MI300X_DPRINTF(fmt, ...) \
-    printf("MI300X: " fmt, ## __VA_ARGS__)
-#else
-#define MI300X_DPRINTF(fmt, ...) do {} while (0)
-#endif
-
 /* ======================================================================
  * gem5 Socket Communication
  * ====================================================================== */
 
-/*
- * Connect to gem5's Unix domain socket.
- * Returns fd on success, -1 on error.
- */
 static int mi300x_socket_connect(MI300XGem5State *s)
 {
     struct sockaddr_un addr;
     int fd;
 
     if (!s->gem5_socket_path || s->gem5_socket_path[0] == '\0') {
-        MI300X_DPRINTF("No gem5 socket path configured\n");
         return -1;
     }
 
@@ -83,19 +70,18 @@ static int mi300x_socket_connect(MI300XGem5State *s)
         return -1;
     }
 
-    MI300X_DPRINTF("Connected to gem5 at %s (fd=%d)\n",
-                   s->gem5_socket_path, fd);
     return fd;
 }
 
 static void mi300x_disconnect_gem5(MI300XGem5State *s)
 {
+    trace_mi300x_gem5_disconnect();
+
     if (s->gem5_mmio_fd >= 0) {
         MI300XGem5MsgHeader msg = {
             .type = cpu_to_le32(MI300X_MSG_SHUTDOWN),
             .size = 0,
         };
-        /* Best effort shutdown notification */
         ssize_t r = write(s->gem5_mmio_fd, &msg, sizeof(msg));
         (void)r;
         close(s->gem5_mmio_fd);
@@ -107,11 +93,6 @@ static void mi300x_disconnect_gem5(MI300XGem5State *s)
     }
 }
 
-/*
- * Send a message on the MMIO socket and optionally receive a response.
- * This is used only for synchronous MMIO operations.
- * Returns 0 on success, -1 on error.
- */
 static int mi300x_mmio_send(MI300XGem5State *s,
                             MI300XGem5MsgHeader *request,
                             MI300XGem5MsgHeader *response)
@@ -156,7 +137,6 @@ static int mi300x_setup_shmem(MI300XGem5State *s, Error **errp)
     void *ptr;
 
     if (!s->shmem_path || s->shmem_path[0] == '\0') {
-        MI300X_DPRINTF("No shmem path, using anonymous VRAM mapping\n");
         return 0;
     }
 
@@ -183,8 +163,7 @@ static int mi300x_setup_shmem(MI300XGem5State *s, Error **errp)
 
     s->shmem_fd = fd;
     s->shmem_ptr = ptr;
-    MI300X_DPRINTF("VRAM shmem mapped at %p, size=0x%" PRIx64 "\n",
-                   ptr, s->vram_size);
+    trace_mi300x_gem5_shmem(s->shmem_path, s->vram_size);
     return 0;
 }
 
@@ -212,7 +191,7 @@ static void mi300x_handle_irq_raise(MI300XGem5State *s,
 {
     uint32_t vector = le64_to_cpu(msg->data) & 0xFFFF;
 
-    MI300X_DPRINTF("IRQ raise vector=%u\n", vector);
+    trace_mi300x_gem5_irq_raise(vector);
 
     bql_lock();
     if (msix_enabled(PCI_DEVICE(s))) {
@@ -233,7 +212,7 @@ static void mi300x_handle_irq_lower(MI300XGem5State *s,
 {
     uint32_t vector = le64_to_cpu(msg->data) & 0xFFFF;
 
-    MI300X_DPRINTF("IRQ lower vector=%u\n", vector);
+    trace_mi300x_gem5_irq_lower(vector);
 
     bql_lock();
     s->irq_status &= ~(1u << vector);
@@ -251,8 +230,7 @@ static void mi300x_handle_dma_read(MI300XGem5State *s,
     MI300XGem5MsgHeader resp;
     ssize_t ret;
 
-    MI300X_DPRINTF("DMA read addr=0x%" PRIx64 " len=%" PRIu64 "\n",
-                   addr, len);
+    trace_mi300x_gem5_dma_read(addr, len);
 
     if (len > MI300X_DMA_BUF_SIZE) {
         error_report("MI300X: DMA read too large: %" PRIu64, len);
@@ -290,8 +268,7 @@ static void mi300x_handle_dma_write(MI300XGem5State *s,
     uint64_t len = le64_to_cpu(msg->data);
     ssize_t ret;
 
-    MI300X_DPRINTF("DMA write addr=0x%" PRIx64 " len=%" PRIu64 "\n",
-                   addr, len);
+    trace_mi300x_gem5_dma_write(addr, len);
 
     if (len > MI300X_DMA_BUF_SIZE) {
         error_report("MI300X: DMA write too large: %" PRIu64, len);
@@ -316,8 +293,6 @@ static void *mi300x_event_thread(void *opaque)
     MI300XGem5MsgHeader msg;
     ssize_t ret;
 
-    MI300X_DPRINTF("Event thread started (fd=%d)\n", s->gem5_event_fd);
-
     while (!s->stopping && s->gem5_event_fd >= 0) {
         ret = read(s->gem5_event_fd, &msg, MI300X_MSG_HDR_SIZE);
         if (ret <= 0) {
@@ -336,6 +311,10 @@ static void *mi300x_event_thread(void *opaque)
             continue;
         }
 
+        trace_mi300x_gem5_event(le32_to_cpu(msg.type),
+                                le64_to_cpu(msg.addr),
+                                le64_to_cpu(msg.data));
+
         switch (le32_to_cpu(msg.type)) {
         case MI300X_MSG_IRQ_RAISE:
             mi300x_handle_irq_raise(s, &msg);
@@ -350,13 +329,12 @@ static void *mi300x_event_thread(void *opaque)
             mi300x_handle_dma_write(s, &msg);
             break;
         default:
-            MI300X_DPRINTF("Unknown event type 0x%x\n",
-                          le32_to_cpu(msg.type));
+            error_report("MI300X: unknown event type 0x%x",
+                         le32_to_cpu(msg.type));
             break;
         }
     }
 
-    MI300X_DPRINTF("Event thread exiting\n");
     return NULL;
 }
 
@@ -369,8 +347,6 @@ static uint64_t mi300x_mmio_read(void *opaque, hwaddr addr, unsigned size)
     MI300XGem5State *s = opaque;
     MI300XGem5MsgHeader req, resp;
     uint64_t val = 0;
-
-    MI300X_DPRINTF("MMIO read addr=0x%" HWADDR_PRIx " size=%u\n", addr, size);
 
     if (s->gem5_mmio_fd < 0) {
         /* Standalone mode: return identification registers */
@@ -400,6 +376,8 @@ static uint64_t mi300x_mmio_read(void *opaque, hwaddr addr, unsigned size)
         val = le64_to_cpu(resp.data);
     }
 
+    trace_mi300x_gem5_mmio_read(addr, size, val);
+
     return val;
 }
 
@@ -409,8 +387,7 @@ static void mi300x_mmio_write(void *opaque, hwaddr addr,
     MI300XGem5State *s = opaque;
     MI300XGem5MsgHeader req;
 
-    MI300X_DPRINTF("MMIO write addr=0x%" HWADDR_PRIx " val=0x%" PRIx64
-                   " size=%u\n", addr, val, size);
+    trace_mi300x_gem5_mmio_write(addr, val, size);
 
     if (s->gem5_mmio_fd < 0) {
         return;
@@ -451,9 +428,6 @@ static uint64_t mi300x_doorbell_read(void *opaque, hwaddr addr, unsigned size)
     MI300XGem5MsgHeader req, resp;
     uint64_t val = 0;
 
-    MI300X_DPRINTF("Doorbell read addr=0x%" HWADDR_PRIx " size=%u\n",
-                   addr, size);
-
     if (s->gem5_mmio_fd < 0) {
         return 0;
     }
@@ -470,6 +444,8 @@ static uint64_t mi300x_doorbell_read(void *opaque, hwaddr addr, unsigned size)
         val = le64_to_cpu(resp.data);
     }
 
+    trace_mi300x_gem5_doorbell_read(addr, size, val);
+
     return val;
 }
 
@@ -479,8 +455,7 @@ static void mi300x_doorbell_write(void *opaque, hwaddr addr,
     MI300XGem5State *s = opaque;
     MI300XGem5MsgHeader req;
 
-    MI300X_DPRINTF("Doorbell write addr=0x%" HWADDR_PRIx " val=0x%" PRIx64
-                   " size=%u\n", addr, val, size);
+    trace_mi300x_gem5_doorbell_write(addr, val, size);
 
     if (s->gem5_mmio_fd < 0) {
         return;
@@ -545,8 +520,6 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
     MI300XGem5State *s = MI300X_GEM5(pdev);
     int ret;
 
-    MI300X_DPRINTF("Realizing MI300X gem5 device\n");
-
     /* Setup PCI config space */
     mi300x_setup_pci_config(pdev);
 
@@ -557,30 +530,15 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
-    /* Initialize MSI-X (on BAR1, to keep BAR0/2/4 for GPU registers) */
-    ret = msix_init_exclusive_bar(pdev, s->msix_vectors, 1, errp);
-    if (ret < 0) {
-        error_prepend(errp, "MI300X: failed to init MSI-X: ");
-        return;
-    }
+    /*
+     * BAR layout must match amdgpu driver expectations:
+     *   BAR0+1: VRAM (64-bit, prefetchable)
+     *   BAR2+3: Doorbell (64-bit)
+     *   BAR4:   MSI-X (exclusive)
+     *   BAR5:   MMIO registers (32-bit)
+     */
 
-    /* Also support legacy MSI as fallback */
-    ret = msi_init(pdev, 0x60, 32, true, false, errp);
-    if (ret < 0) {
-        error_prepend(errp, "MI300X: failed to init MSI: ");
-        msix_uninit_exclusive_bar(pdev);
-        return;
-    }
-
-    /* BAR0: MMIO register space */
-    memory_region_init_io(&s->mmio_bar, OBJECT(s), &mi300x_mmio_ops, s,
-                          "mi300x-mmio", MI300X_MMIO_SIZE);
-    pci_register_bar(pdev, MI300X_MMIO_BAR,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64,
-                     &s->mmio_bar);
-
-    /* BAR2: VRAM (shared memory with gem5) */
+    /* BAR0+1: VRAM (shared memory with gem5, 64-bit prefetchable) */
     if (s->shmem_path && s->shmem_path[0] != '\0') {
         if (mi300x_setup_shmem(s, errp) < 0) {
             return;
@@ -604,13 +562,35 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
                      PCI_BASE_ADDRESS_MEM_TYPE_64,
                      &s->vram_bar);
 
-    /* BAR4: Doorbell / signal pages */
+    /* BAR2+3: Doorbell / signal pages (64-bit) */
     memory_region_init_io(&s->doorbell_bar, OBJECT(s), &mi300x_doorbell_ops, s,
                           "mi300x-doorbell", MI300X_DOORBELL_SIZE);
     pci_register_bar(pdev, MI300X_DOORBELL_BAR,
                      PCI_BASE_ADDRESS_SPACE_MEMORY |
                      PCI_BASE_ADDRESS_MEM_TYPE_64,
                      &s->doorbell_bar);
+
+    /* BAR4: MSI-X (exclusive bar) */
+    ret = msix_init_exclusive_bar(pdev, s->msix_vectors, MI300X_MSIX_BAR, errp);
+    if (ret < 0) {
+        error_prepend(errp, "MI300X: failed to init MSI-X: ");
+        return;
+    }
+
+    /* Also support legacy MSI as fallback */
+    ret = msi_init(pdev, 0x60, 32, true, false, errp);
+    if (ret < 0) {
+        error_prepend(errp, "MI300X: failed to init MSI: ");
+        msix_uninit_exclusive_bar(pdev);
+        return;
+    }
+
+    /* BAR5: MMIO register space (32-bit, forwarded to gem5) */
+    memory_region_init_io(&s->mmio_bar, OBJECT(s), &mi300x_mmio_ops, s,
+                          "mi300x-mmio", MI300X_MMIO_SIZE);
+    pci_register_bar(pdev, MI300X_MMIO_BAR,
+                     PCI_BASE_ADDRESS_SPACE_MEMORY,
+                     &s->mmio_bar);
 
     /* Allocate DMA staging buffer */
     s->dma_buf = g_malloc0(MI300X_DMA_BUF_SIZE);
@@ -634,6 +614,8 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
         /* First connection: MMIO */
         s->gem5_mmio_fd = mi300x_socket_connect(s);
         if (s->gem5_mmio_fd >= 0) {
+            trace_mi300x_gem5_connect(s->gem5_mmio_fd, "mmio");
+
             /* Send init message on MMIO socket */
             MI300XGem5MsgHeader init_msg = {
                 .type = cpu_to_le32(MI300X_MSG_INIT),
@@ -643,12 +625,14 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
             MI300XGem5MsgHeader init_resp;
             mi300x_mmio_send(s, &init_msg, &init_resp);
 
-            MI300X_DPRINTF("INIT response: gem5 vram=%" PRIu64 "\n",
-                          le64_to_cpu(init_resp.data));
+            trace_mi300x_gem5_init(s->vram_size,
+                                   le64_to_cpu(init_resp.data));
 
             /* Second connection: Events (gem5->QEMU async) */
             s->gem5_event_fd = mi300x_socket_connect(s);
             if (s->gem5_event_fd >= 0) {
+                trace_mi300x_gem5_connect(s->gem5_event_fd, "event");
+
                 /* Start event thread only if event connection succeeded */
                 s->stopping = false;
                 s->event_thread_running = true;
@@ -665,15 +649,12 @@ static void mi300x_gem5_realize(PCIDevice *pdev, Error **errp)
         }
     }
 
-    MI300X_DPRINTF("MI300X gem5 device realized (VRAM=%" PRIu64 " MB)\n",
-                   s->vram_size / (1024 * 1024));
+    trace_mi300x_gem5_realize(s->vram_size / (1024 * 1024));
 }
 
 static void mi300x_gem5_exit(PCIDevice *pdev)
 {
     MI300XGem5State *s = MI300X_GEM5(pdev);
-
-    MI300X_DPRINTF("MI300X gem5 device exit\n");
 
     /* Stop event thread */
     if (s->event_thread_running) {
@@ -705,8 +686,6 @@ static void mi300x_gem5_exit(PCIDevice *pdev)
 static void mi300x_gem5_reset(DeviceState *dev)
 {
     MI300XGem5State *s = MI300X_GEM5(dev);
-
-    MI300X_DPRINTF("MI300X gem5 device reset\n");
 
     s->irq_status = 0;
     s->next_txn_id = 0;
@@ -752,7 +731,8 @@ static void mi300x_gem5_class_init(ObjectClass *klass, const void *data)
     k->vendor_id = PCI_VENDOR_ID_ATI;
     k->device_id = PCI_DEVICE_ID_MI300X;
     k->revision = 0xc8;  /* MI300X revision */
-    k->class_id = PCI_CLASS_DISPLAY_OTHER;  /* Display controller */
+    /* VGA-compatible: driver checks legacy ROM at 0xC0000 */
+    k->class_id = PCI_CLASS_DISPLAY_VGA;
 
     device_class_set_legacy_reset(dc, mi300x_gem5_reset);
     device_class_set_props(dc, mi300x_gem5_properties);

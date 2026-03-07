@@ -423,3 +423,19 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
 iommu_testdev_dma_verify(uint32_t expected, uint32_t actual) "expected=0x%x actual=0x%x"
 iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
 iommu_testdev_dma_armed(bool armed) "armed=%d"
+
+# mi300x_gem5.c
+mi300x_gem5_mmio_read(uint64_t addr, unsigned size, uint64_t val) "addr=0x%" PRIx64 " size=%u val=0x%" PRIx64
+mi300x_gem5_mmio_write(uint64_t addr, uint64_t val, unsigned size) "addr=0x%" PRIx64 " val=0x%" PRIx64 " size=%u"
+mi300x_gem5_doorbell_read(uint64_t addr, unsigned size, uint64_t val) "addr=0x%" PRIx64 " size=%u val=0x%" PRIx64
+mi300x_gem5_doorbell_write(uint64_t addr, uint64_t val, unsigned size) "addr=0x%" PRIx64 " val=0x%" PRIx64 " size=%u"
+mi300x_gem5_connect(int fd, const char *role) "fd=%d role=%s"
+mi300x_gem5_disconnect(void) "disconnecting from gem5"
+mi300x_gem5_init(uint64_t qemu_vram, uint64_t gem5_vram) "qemu_vram=0x%" PRIx64 " gem5_vram=0x%" PRIx64
+mi300x_gem5_irq_raise(uint32_t vector) "vector=%u"
+mi300x_gem5_irq_lower(uint32_t vector) "vector=%u"
+mi300x_gem5_dma_read(uint64_t addr, uint64_t len) "addr=0x%" PRIx64 " len=%" PRIu64
+mi300x_gem5_dma_write(uint64_t addr, uint64_t len) "addr=0x%" PRIx64 " len=%" PRIu64
+mi300x_gem5_event(uint32_t type, uint64_t addr, uint64_t data) "type=0x%x addr=0x%" PRIx64 " data=0x%" PRIx64
+mi300x_gem5_realize(uint64_t vram_mb) "VRAM=%" PRIu64 " MB"
+mi300x_gem5_shmem(const char *path, uint64_t size) "path=%s size=0x%" PRIx64

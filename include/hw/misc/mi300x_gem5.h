@@ -31,17 +31,21 @@ OBJECT_DECLARE_SIMPLE_TYPE(MI300XGem5State, MI300X_GEM5)
 #define PCI_SUBSYSTEM_ID_MI300X         0x74a0
 
 /*
- * MI300X BAR layout:
- *   BAR0: MMIO registers (256MB) - GPU register space forwarded to gem5
- *   BAR2: VRAM (shared memory, configurable size) - GPU framebuffer/HBM
- *   BAR4: Doorbell (8MB) - GPU doorbell/signal page
+ * MI300X BAR layout (must match amdgpu driver expectations):
+ *   BAR0+1: VRAM (16GB, 64-bit, prefetchable) - GPU framebuffer/HBM
+ *   BAR2+3: Doorbell (2MB, 64-bit) - GPU doorbell/signal pages
+ *   BAR4:   MSI-X (exclusive bar)
+ *   BAR5:   MMIO registers (512KB, 32-bit) - forwarded to gem5
+ *
+ * The amdgpu driver hardcodes: VRAM=BAR0, Doorbell=BAR2, MMIO=BAR5.
  */
-#define MI300X_MMIO_BAR         0
-#define MI300X_VRAM_BAR         2
-#define MI300X_DOORBELL_BAR     4
+#define MI300X_VRAM_BAR         0
+#define MI300X_DOORBELL_BAR     2
+#define MI300X_MSIX_BAR         4
+#define MI300X_MMIO_BAR         5
 
-#define MI300X_MMIO_SIZE        (256 * 1024 * 1024)   /* 256 MB */
-#define MI300X_DOORBELL_SIZE    (8 * 1024 * 1024)     /* 8 MB */
+#define MI300X_MMIO_SIZE        (512 * 1024)           /* 512 KB */
+#define MI300X_DOORBELL_SIZE    (2 * 1024 * 1024)      /* 2 MB */
 #define MI300X_VRAM_DEFAULT_SIZE (16ULL * 1024 * 1024 * 1024) /* 16 GB default */
 
 #define MI300X_MSIX_VECTORS     256
@@ -96,10 +100,10 @@ struct MI300XGem5State {
     /* Private */
     PCIDevice parent_obj;
 
-    /* MMIO BARs */
-    MemoryRegion mmio_bar;      /* BAR0: GPU register space */
-    MemoryRegion vram_bar;      /* BAR2: VRAM (shared memory) */
-    MemoryRegion doorbell_bar;  /* BAR4: Doorbell/signal pages */
+    /* PCI BARs */
+    MemoryRegion vram_bar;      /* BAR0: VRAM (shared memory, 64-bit) */
+    MemoryRegion doorbell_bar;  /* BAR2: Doorbell/signal pages (64-bit) */
+    MemoryRegion mmio_bar;      /* BAR5: GPU register space (32-bit) */
 
     /* gem5 connection - two sockets for clean separation */
     char *gem5_socket_path;     /* path to gem5 Unix domain socket */
