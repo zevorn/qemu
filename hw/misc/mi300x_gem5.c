@@ -109,7 +109,9 @@ static int mi300x_mmio_send(MI300XGem5State *s,
 
     ret = write(s->gem5_mmio_fd, request, MI300X_MSG_HDR_SIZE);
     if (ret != MI300X_MSG_HDR_SIZE) {
-        error_report("MI300X: lost connection to gem5 (write failed)");
+        if (!s->stopping) {
+            error_report("MI300X: lost connection to gem5 (write failed)");
+        }
         close(s->gem5_mmio_fd);
         s->gem5_mmio_fd = -1;
         qemu_mutex_unlock(&s->mmio_mutex);
@@ -119,7 +121,9 @@ static int mi300x_mmio_send(MI300XGem5State *s,
     if (response) {
         ret = read(s->gem5_mmio_fd, response, MI300X_MSG_HDR_SIZE);
         if (ret != MI300X_MSG_HDR_SIZE) {
-            error_report("MI300X: lost connection to gem5 (read failed)");
+            if (!s->stopping) {
+                error_report("MI300X: lost connection to gem5 (read failed)");
+            }
             close(s->gem5_mmio_fd);
             s->gem5_mmio_fd = -1;
             qemu_mutex_unlock(&s->mmio_mutex);
