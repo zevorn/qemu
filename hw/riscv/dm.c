@@ -4,61 +4,85 @@
  * Copyright (c) 2025 Chao Liu <chao.liu.zevorn@gmail.com>
  *
  * Based on the RISC-V Debug Specification v1.0 (ratified 2025-02-21)
+ * Uses the QEMU register.h framework for declarative register definitions.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "qapi/error.h"
 #include "hw/core/cpu.h"
-#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/irq.h"
 #include "hw/riscv/dm.h"
 #include "exec/cpu-common.h"
 #include "migration/vmstate.h"
+#include "exec/translation-block.h"
 #include "system/tcg.h"
 #include "target/riscv/cpu.h"
 #include "trace.h"
 
+/* Addresses = DMI word address × 4 (byte offsets). */
+
+REG32(DATA0,  0x10)
+REG32(DATA1,  0x14)
+REG32(DATA2,  0x18)
+REG32(DATA3,  0x1C)
+REG32(DATA4,  0x20)
+REG32(DATA5,  0x24)
+REG32(DATA6,  0x28)
+REG32(DATA7,  0x2C)
+REG32(DATA8,  0x30)
+REG32(DATA9,  0x34)
+REG32(DATA10, 0x38)
+REG32(DATA11, 0x3C)
+
 REG32(DMCONTROL, 0x40)
-    FIELD(DMCONTROL, DMACTIVE, 0, 1)
-    FIELD(DMCONTROL, NDMRESET, 1, 1)
-    FIELD(DMCONTROL, CLRRESETHALTREQ, 2, 1)
-    FIELD(DMCONTROL, SETRESETHALTREQ, 3, 1)
-    FIELD(DMCONTROL, HARTSELLO, 6, 10)
-    FIELD(DMCONTROL, HARTSELHI, 16, 10)
-    FIELD(DMCONTROL, HASEL, 26, 1)
-    FIELD(DMCONTROL, ACKHAVERESET, 28, 1)
-    FIELD(DMCONTROL, HARTRESET, 29, 1)
-    FIELD(DMCONTROL, RESUMEREQ, 30, 1)
-    FIELD(DMCONTROL, HALTREQ, 31, 1)
+    FIELD(DMCONTROL, DMACTIVE,        0,  1)
+    FIELD(DMCONTROL, NDMRESET,        1,  1)
+    FIELD(DMCONTROL, CLRRESETHALTREQ, 2,  1)
+    FIELD(DMCONTROL, SETRESETHALTREQ, 3,  1)
+    FIELD(DMCONTROL, CLRKEEPALIVE,    4,  1)
+    FIELD(DMCONTROL, SETKEEPALIVE,    5,  1)
+    FIELD(DMCONTROL, HARTSELLO,       6, 10)
+    FIELD(DMCONTROL, HARTSELHI,      16, 10)
+    FIELD(DMCONTROL, HASEL,          26,  1)
+    FIELD(DMCONTROL, ACKUNAVAIL,     27,  1)
+    FIELD(DMCONTROL, ACKHAVERESET,   28,  1)
+    FIELD(DMCONTROL, HARTRESET,      29,  1)
+    FIELD(DMCONTROL, RESUMEREQ,      30,  1)
+    FIELD(DMCONTROL, HALTREQ,        31,  1)
 
 REG32(DMSTATUS, 0x44)
-    FIELD(DMSTATUS, VERSION, 0, 4)
-    FIELD(DMSTATUS, HASRESETHALTREQ, 5, 1)
-    FIELD(DMSTATUS, AUTHENTICATED, 7, 1)
-    FIELD(DMSTATUS, ANYHALTED, 8, 1)
-    FIELD(DMSTATUS, ALLHALTED, 9, 1)
-    FIELD(DMSTATUS, ANYRUNNING, 10, 1)
-    FIELD(DMSTATUS, ALLRUNNING, 11, 1)
-    FIELD(DMSTATUS, ANYUNAVAIL, 12, 1)
-    FIELD(DMSTATUS, ALLUNAVAIL, 13, 1)
-    FIELD(DMSTATUS, ANYNONEXISTENT, 14, 1)
-    FIELD(DMSTATUS, ALLNONEXISTENT, 15, 1)
-    FIELD(DMSTATUS, ANYRESUMEACK, 16, 1)
-    FIELD(DMSTATUS, ALLRESUMEACK, 17, 1)
-    FIELD(DMSTATUS, ANYHAVERESET, 18, 1)
-    FIELD(DMSTATUS, ALLHAVERESET, 19, 1)
-    FIELD(DMSTATUS, IMPEBREAK, 22, 1)
+    FIELD(DMSTATUS, VERSION,          0, 4)
+    FIELD(DMSTATUS, CONFSTRPTRVALID,  4, 1)
+    FIELD(DMSTATUS, HASRESETHALTREQ,  5, 1)
+    FIELD(DMSTATUS, AUTHBUSY,         6, 1)
+    FIELD(DMSTATUS, AUTHENTICATED,    7, 1)
+    FIELD(DMSTATUS, ANYHALTED,        8, 1)
+    FIELD(DMSTATUS, ALLHALTED,        9, 1)
+    FIELD(DMSTATUS, ANYRUNNING,      10, 1)
+    FIELD(DMSTATUS, ALLRUNNING,      11, 1)
+    FIELD(DMSTATUS, ANYUNAVAIL,      12, 1)
+    FIELD(DMSTATUS, ALLUNAVAIL,      13, 1)
+    FIELD(DMSTATUS, ANYNONEXISTENT,  14, 1)
+    FIELD(DMSTATUS, ALLNONEXISTENT,  15, 1)
+    FIELD(DMSTATUS, ANYRESUMEACK,    16, 1)
+    FIELD(DMSTATUS, ALLRESUMEACK,    17, 1)
+    FIELD(DMSTATUS, ANYHAVERESET,    18, 1)
+    FIELD(DMSTATUS, ALLHAVERESET,    19, 1)
+    FIELD(DMSTATUS, IMPEBREAK,       22, 1)
+    FIELD(DMSTATUS, STICKYUNAVAIL,   23, 1)
     FIELD(DMSTATUS, NDMRESETPENDING, 24, 1)
 
 REG32(HARTINFO, 0x48)
-    FIELD(HARTINFO, DATAADDR, 0, 12)
-    FIELD(HARTINFO, DATASIZE, 12, 4)
-    FIELD(HARTINFO, DATAACCESS, 16, 1)
-    FIELD(HARTINFO, NSCRATCH, 20, 4)
+    FIELD(HARTINFO, DATAADDR,    0, 12)
+    FIELD(HARTINFO, DATASIZE,   12,  4)
+    FIELD(HARTINFO, DATAACCESS, 16,  1)
+    FIELD(HARTINFO, NSCRATCH,   20,  4)
 
-REG32(HALTSUM1, 0x4c)
+REG32(HALTSUM1, 0x4C)
 
 REG32(HAWINDOWSEL, 0x50)
     FIELD(HAWINDOWSEL, HAWINDOWSEL, 0, 15)
@@ -66,12 +90,143 @@ REG32(HAWINDOWSEL, 0x50)
 REG32(HAWINDOW, 0x54)
 
 REG32(ABSTRACTCS, 0x58)
-    FIELD(ABSTRACTCS, DATACOUNT, 0, 4)
-    FIELD(ABSTRACTCS, CMDERR, 8, 3)
-    FIELD(ABSTRACTCS, BUSY, 12, 1)
+    FIELD(ABSTRACTCS, DATACOUNT,   0,  4)
+    FIELD(ABSTRACTCS, CMDERR,      8,  3)
+    FIELD(ABSTRACTCS, BUSY,       12,  1)
     FIELD(ABSTRACTCS, PROGBUFSIZE, 24, 5)
 
+REG32(COMMAND, 0x5C)
+    FIELD(COMMAND, REGNO,            0, 16)
+    FIELD(COMMAND, WRITE,           16,  1)
+    FIELD(COMMAND, TRANSFER,        17,  1)
+    FIELD(COMMAND, POSTEXEC,        18,  1)
+    FIELD(COMMAND, AARPOSTINCREMENT, 19, 1)
+    FIELD(COMMAND, AARSIZE,         20,  3)
+    FIELD(COMMAND, CMDTYPE,         24,  8)
+
+REG32(ABSTRACTAUTO, 0x60)
+    FIELD(ABSTRACTAUTO, AUTOEXECDATA,    0, 12)
+    FIELD(ABSTRACTAUTO, AUTOEXECPROGBUF, 16, 16)
+
+REG32(CONFSTRPTR0, 0x64)
+REG32(CONFSTRPTR1, 0x68)
+REG32(CONFSTRPTR2, 0x6C)
+REG32(CONFSTRPTR3, 0x70)
+
+REG32(NEXTDM, 0x74)
+
+REG32(PROGBUF0,  0x80)
+REG32(PROGBUF1,  0x84)
+REG32(PROGBUF2,  0x88)
+REG32(PROGBUF3,  0x8C)
+REG32(PROGBUF4,  0x90)
+REG32(PROGBUF5,  0x94)
+REG32(PROGBUF6,  0x98)
+REG32(PROGBUF7,  0x9C)
+REG32(PROGBUF8,  0xA0)
+REG32(PROGBUF9,  0xA4)
+REG32(PROGBUF10, 0xA8)
+REG32(PROGBUF11, 0xAC)
+REG32(PROGBUF12, 0xB0)
+REG32(PROGBUF13, 0xB4)
+REG32(PROGBUF14, 0xB8)
+REG32(PROGBUF15, 0xBC)
+
+REG32(AUTHDATA, 0xC0)
+
+REG32(DMCS2, 0xC8)
+    FIELD(DMCS2, HGSELECT,    0, 1)
+    FIELD(DMCS2, HGWRITE,     1, 1)
+    FIELD(DMCS2, GROUP,        2, 5)
+    FIELD(DMCS2, DMEXTTRIGGER, 7, 4)
+    FIELD(DMCS2, GROUPTYPE,   11, 1)
+
+REG32(HALTSUM2, 0xD0)
+REG32(HALTSUM3, 0xD4)
+
+REG32(SBADDRESS3, 0xDC)
+
+REG32(SBCS, 0xE0)
+    FIELD(SBCS, SBACCESS8,     0, 1)
+    FIELD(SBCS, SBACCESS16,    1, 1)
+    FIELD(SBCS, SBACCESS32,    2, 1)
+    FIELD(SBCS, SBACCESS64,    3, 1)
+    FIELD(SBCS, SBACCESS128,   4, 1)
+    FIELD(SBCS, SBASIZE,       5, 7)
+    FIELD(SBCS, SBERROR,      12, 3)
+    FIELD(SBCS, SBREADONDATA, 15, 1)
+    FIELD(SBCS, SBAUTOINCREMENT, 16, 1)
+    FIELD(SBCS, SBACCESS,     17, 3)
+    FIELD(SBCS, SBREADONADDR, 20, 1)
+    FIELD(SBCS, SBBUSY,       21, 1)
+    FIELD(SBCS, SBBUSYERROR,  22, 1)
+    FIELD(SBCS, SBVERSION,    29, 3)
+
+REG32(SBADDRESS0, 0xE4)
+REG32(SBADDRESS1, 0xE8)
+REG32(SBADDRESS2, 0xEC)
+
+REG32(SBDATA0, 0xF0)
+REG32(SBDATA1, 0xF4)
+REG32(SBDATA2, 0xF8)
+REG32(SBDATA3, 0xFC)
+
 REG32(HALTSUM0, 0x100)
+
+
+/* Minimal instruction builders used by abstract commands and ROM mailboxes. */
+#define DM_I(opcode, funct3, rd, rs1, imm) \
+    (((((uint32_t)(imm)) & 0xfffu) << 20) | \
+     (((uint32_t)(rs1)) << 15) | (((uint32_t)(funct3)) << 12) | \
+     (((uint32_t)(rd)) << 7) | ((uint32_t)(opcode)))
+
+#define DM_S(opcode, funct3, rs1, rs2, imm) \
+    (((((((uint32_t)(imm)) >> 5) & 0x7fu) << 25) | \
+      (((uint32_t)(rs2)) << 20) | (((uint32_t)(rs1)) << 15) | \
+      (((uint32_t)(funct3)) << 12) | ((((uint32_t)(imm)) & 0x1fu) << 7) | \
+      ((uint32_t)(opcode))))
+
+#define DM_LOAD(rd, rs1, offset, size) \
+    DM_I(0x03u, size, rd, rs1, offset)
+
+#define DM_STORE(rs2, rs1, offset, size) \
+    DM_S(0x23u, size, rs1, rs2, offset)
+
+#define DM_FP_LOAD(rd, rs1, offset, size) \
+    DM_I(0x07u, size, rd, rs1, offset)
+
+#define DM_FP_STORE(rs2, rs1, offset, size) \
+    DM_S(0x27u, size, rs1, rs2, offset)
+
+#define DM_LBU(rd, rs1, offset) \
+    DM_LOAD(rd, rs1, offset, 4u)
+
+#define DM_DATA_LOAD(rd, size) \
+    DM_LOAD(rd, 0u, RISCV_DM_ROM_DATA, size)
+
+#define DM_DATA_STORE(rs2, size) \
+    DM_STORE(rs2, 0u, RISCV_DM_ROM_DATA, size)
+
+#define DM_DATA_FP_LOAD(rd, size) \
+    DM_FP_LOAD(rd, 0u, RISCV_DM_ROM_DATA, size)
+
+#define DM_DATA_FP_STORE(rs2, size) \
+    DM_FP_STORE(rs2, 0u, RISCV_DM_ROM_DATA, size)
+
+/* csrr rd=s0, csr=regno */
+#define DM_CSRR(regno) \
+    (0x2473u | ((uint32_t)(regno) << 20))
+
+/* csrw csr=regno, rs1=s0 */
+#define DM_CSRW(regno) \
+    (0x41073u | ((uint32_t)(regno) << 20))
+
+/* jal x0, imm (imm is in units of 2 bytes, encoded in J-format) */
+#define DM_JAL(imm) \
+    (0x6fu | ((uint32_t)(imm) << 21))
+
+#define DM_NOP    0x13u
+#define DM_EBREAK 0x100073u
 
 typedef struct DMHartSelection {
     int all[RISCV_DM_HAWINDOW_SIZE + 1];
@@ -107,6 +262,103 @@ static inline void dm_rom_write32(RISCVDMState *s, uint32_t offset,
 static inline void dm_rom_write8(RISCVDMState *s, uint32_t offset, uint8_t val)
 {
     s->rom_ptr[offset] = val;
+}
+
+static inline uint8_t dm_rom_read8(RISCVDMState *s, uint32_t offset)
+{
+    return s->rom_ptr[offset];
+}
+
+static void dm_sync_data_to_rom(RISCVDMState *s, int data_index)
+{
+    uint32_t val = s->regs[R_DATA0 + data_index];
+    dm_rom_write32(s, RISCV_DM_ROM_DATA + data_index * 4, val);
+}
+
+static void dm_sync_progbuf_to_rom(RISCVDMState *s, int progbuf_index)
+{
+    uint32_t val = s->regs[R_PROGBUF0 + progbuf_index];
+    dm_rom_write32(s, RISCV_DM_ROM_PROGBUF + progbuf_index * 4, val);
+}
+
+static void dm_flush_cmd_space(RISCVDMState *s)
+{
+    for (int i = 0; i < 8; i++) {
+        dm_rom_write32(s, RISCV_DM_ROM_CMD + i * 4, DM_NOP);
+    }
+    /* Restore s0 from dscratch0 */
+    dm_rom_write32(s, RISCV_DM_ROM_CMD + 8 * 4, DM_CSRR(0x7b2));
+    /* ebreak */
+    dm_rom_write32(s, RISCV_DM_ROM_CMD + 9 * 4, DM_EBREAK);
+    /* Default whereto: jump to CMD space from the ROM dispatcher. */
+    dm_rom_write32(s, RISCV_DM_ROM_WHERETO, DM_JAL(0x1C));
+}
+
+static void dm_invalidate_dynamic_code(RISCVDMState *s)
+{
+    if (tcg_enabled()) {
+        ram_addr_t base = memory_region_get_ram_addr(&s->rom_mr);
+
+        tb_invalidate_phys_range(NULL, base + RISCV_DM_ROM_WHERETO,
+                                 base + RISCV_DM_ROM_DATA - 1);
+    }
+}
+
+static void dm_update_impebreak(RISCVDMState *s)
+{
+    hwaddr ebreak_addr = RISCV_DM_ROM_PROGBUF + s->progbuf_size * 4;
+
+    if (ebreak_addr + 4 > RISCV_DM_ROM_DATA) {
+        return;
+    }
+
+    dm_rom_write32(s, ebreak_addr, s->impebreak ? DM_EBREAK : DM_NOP);
+}
+
+static void dm_reset_rom_state(RISCVDMState *s)
+{
+    if (!s->rom_ptr) {
+        return;
+    }
+
+    memset(s->rom_ptr + RISCV_DM_ROM_WORK_BASE, 0, RISCV_DM_ROM_WORK_SIZE);
+
+    dm_flush_cmd_space(s);
+
+    for (uint32_t i = 0; i < s->num_abstract_data; i++) {
+        dm_sync_data_to_rom(s, i);
+    }
+    for (uint32_t i = 0; i < s->progbuf_size; i++) {
+        dm_sync_progbuf_to_rom(s, i);
+    }
+
+    dm_update_impebreak(s);
+    dm_invalidate_dynamic_code(s);
+}
+
+static inline void dm_set_cmderr(RISCVDMState *s, uint32_t err)
+{
+    uint32_t cur = ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, CMDERR);
+    if (cur == RISCV_DM_CMDERR_NONE) {
+        ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, CMDERR, err);
+    }
+}
+
+static bool dm_abstract_cmd_completed(RISCVDMState *s, uint32_t hartsel)
+{
+    uint32_t selected = dm_get_hartsel(s);
+    uint8_t flags;
+
+    if (!ARRAY_FIELD_EX32(s->regs, ABSTRACTCS, BUSY) || selected != hartsel) {
+        return false;
+    }
+
+    /*
+     * The hart only completes an execution-based abstract command after it has
+     * consumed GO and returned to the park loop.
+     */
+    flags = dm_rom_read8(s, RISCV_DM_ROM_FLAGS + hartsel);
+    return !(flags & RISCV_DM_FLAG_GOING);
 }
 
 static void dm_selection_add(RISCVDMState *s, DMHartSelection *sel, int hartsel)
@@ -637,6 +889,65 @@ static const MemoryRegionOps dm_rom_ops = {
 
 static bool dm_rom_realize(RISCVDMState *s, Error **errp)
 {
+    /*
+     * ROM program at 0x800:
+     * - entry: jump to _entry
+     * - resume: jump to _resume
+     * - exception: jump to _exception
+     * - _entry: fence, save s0, poll FLAGS loop
+     * - _exception: write EXCP, restore s0, ebreak
+     * - going: write GOING, restore s0, jump to whereto
+     * - _resume: write RESUME hartid, restore s0, dret
+     */
+    static const uint32_t rom_code_entry[] = {
+        /* 0x800 <entry>: */
+        0x0180006f,                               /* j   818 <_entry>      */
+        0x00000013,                               /* nop                   */
+
+        /* 0x808 <resume>: */
+        0x0600006f,                               /* j   868 <_resume>     */
+        0x00000013,                               /* nop                   */
+
+        /* 0x810 <exception>: */
+        0x0400006f,                               /* j   850 <_exception>  */
+        0x00000013,                               /* nop                   */
+
+        /* 0x818 <_entry>: */
+        0x0ff0000f,                               /* fence                 */
+        0x7b241073,                               /* csrw dscratch0, s0    */
+
+        /* 0x820 <entry_loop>: */
+        0xf1402473,                               /* csrr s0, mhartid      */
+        0x07f47413,                               /* andi s0, s0, 127      */
+        DM_STORE(8, 0u, RISCV_DM_ROM_HARTID, 2u), /* sw s0, HARTID(zero)   */
+        DM_LBU(8, 8, RISCV_DM_ROM_FLAGS),         /* lbu s0, FLAGS(s0)     */
+        0x00147413,                               /* andi s0, s0, 1        */
+        0x02041463,                               /* bnez s0, 85c <going>  */
+        0xf1402473,                               /* csrr s0, mhartid      */
+        0x07f47413,                               /* andi s0, s0, 127      */
+        DM_LBU(8, 8, RISCV_DM_ROM_FLAGS),         /* lbu s0, FLAGS(s0)     */
+        0x00247413,                               /* andi s0, s0, 2        */
+        0xfc0410e3,                               /* bnez s0, 808 <resume> */
+        0xfd5ff06f,                               /* j    820 <entry_loop> */
+
+        /* 0x850 <_exception>: */
+        DM_STORE(0, 0u, RISCV_DM_ROM_EXCP, 2u),   /* sw zero, EXCP(zero)   */
+        0x7b202473,                               /* csrr s0, dscratch0    */
+        0x00100073,                               /* ebreak                */
+
+        /* 0x85c <going>: */
+        DM_STORE(0, 0u, RISCV_DM_ROM_GOING, 2u),  /* sw zero, GOING(zero)  */
+        0x7b202473,                               /* csrr s0, dscratch0    */
+        0xa9dff06f,                               /* j    300 <whereto>    */
+
+        /* 0x868 <_resume>: */
+        0xf1402473,                               /* csrr s0, mhartid      */
+        0x07f47413,                               /* andi s0, s0, 127      */
+        DM_STORE(8, 0u, RISCV_DM_ROM_RESUME, 2u), /* sw s0, RESUME(zero)   */
+        0x7b202473,                               /* csrr s0, dscratch0    */
+        0x7b200073,                               /* dret                  */
+    };
+
     SysBusDevice *sbd = SYS_BUS_DEVICE(s);
 
     if (!memory_region_init_rom_device(&s->rom_mr, OBJECT(s), &dm_rom_ops, s,
@@ -644,8 +955,10 @@ static bool dm_rom_realize(RISCVDMState *s, Error **errp)
                                        errp)) {
         return false;
     }
-
     s->rom_ptr = memory_region_get_ram_ptr(&s->rom_mr);
+
+    memcpy(s->rom_ptr + RISCV_DM_ROM_ENTRY, rom_code_entry,
+           sizeof(rom_code_entry));
 
     memory_region_init_alias(&s->rom_work_alias_mr, OBJECT(s),
                              "riscv-dm.rom-work", &s->rom_mr,
@@ -656,6 +969,7 @@ static bool dm_rom_realize(RISCVDMState *s, Error **errp)
 
     sysbus_init_mmio(sbd, &s->rom_work_alias_mr);
     sysbus_init_mmio(sbd, &s->rom_entry_alias_mr);
+
     return true;
 }
 
@@ -666,7 +980,11 @@ void riscv_dm_hart_halted(RISCVDMState *s, uint32_t hartsel)
     }
 
     s->hart_halted[hartsel] = true;
-    riscv_dm_abstracts_done(s, hartsel);
+
+    if (dm_abstract_cmd_completed(s, hartsel)) {
+        riscv_dm_abstracts_done(s, hartsel);
+    }
+
     dm_status_refresh(s);
     trace_riscv_dm_hart_halted(hartsel);
 }
@@ -692,22 +1010,29 @@ void riscv_dm_abstracts_done(RISCVDMState *s, uint32_t hartsel)
 
 void riscv_dm_abstracts_exception(RISCVDMState *s, uint32_t hartsel)
 {
-    ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, BUSY, 0);
-    ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, CMDERR,
-                     RISCV_DM_CMDERR_EXCEPTION);
+    dm_set_cmderr(s, RISCV_DM_CMDERR_EXCEPTION);
     trace_riscv_dm_abstract_cmd_exception(hartsel);
 }
 
 static void dm_debug_reset(RISCVDMState *s)
 {
-    memset(s->regs, 0, sizeof(s->regs));
-    ARRAY_FIELD_DP32(s->regs, DMSTATUS, VERSION, 3);
+    s->dm_active = false;
+
+    /* Reset all registers via framework */
+    for (unsigned int i = 0; i < ARRAY_SIZE(s->regs_info); i++) {
+        register_reset(&s->regs_info[i]);
+    }
+
+    /* Set config-dependent reset values */
+    ARRAY_FIELD_DP32(s->regs, DMSTATUS, VERSION, 3);       /* v1.0 */
     ARRAY_FIELD_DP32(s->regs, DMSTATUS, AUTHENTICATED, 1);
-    ARRAY_FIELD_DP32(s->regs, DMSTATUS, IMPEBREAK, s->impebreak);
+    ARRAY_FIELD_DP32(s->regs, DMSTATUS, IMPEBREAK, s->impebreak ? 1 : 0);
+
     ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, DATACOUNT, s->num_abstract_data);
     ARRAY_FIELD_DP32(s->regs, ABSTRACTCS, PROGBUFSIZE, s->progbuf_size);
 
-    if (s->hart_halted) {
+    /* Reset per-hart state */
+    if (s->hart_resumeack && s->num_harts > 0) {
         for (uint32_t i = 0; i < s->num_harts; i++) {
             s->hart_halted[i] = false;
             s->hart_resumeack[i] = false;
@@ -717,12 +1042,9 @@ static void dm_debug_reset(RISCVDMState *s)
     }
 
     memset(s->hawindow, 0, sizeof(s->hawindow));
-    s->dm_active = false;
+    s->last_cmd = 0;
 
-    if (s->rom_ptr) {
-        memset(s->rom_ptr, 0, RISCV_DM_SIZE);
-    }
-
+    dm_reset_rom_state(s);
     dm_status_refresh(s);
 }
 
@@ -803,6 +1125,7 @@ static const VMStateDescription vmstate_riscv_dm = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, RISCVDMState, RISCV_DM_R_MAX),
         VMSTATE_BOOL(dm_active, RISCVDMState),
+        VMSTATE_UINT32(last_cmd, RISCVDMState),
         VMSTATE_VARRAY_UINT32(hart_halted, RISCVDMState, num_harts,
                               0, vmstate_info_bool, bool),
         VMSTATE_VARRAY_UINT32(hart_resumeack, RISCVDMState, num_harts,
