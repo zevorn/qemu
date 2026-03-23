@@ -33,6 +33,37 @@ static void rvt2_raise_irq(Rvt2State *s, uint32_t irq_bit, int vector)
     }
 }
 
+static void rvt2_write_completion(Rvt2State *s, const Rvt2Completion *cpl)
+{
+    uint64_t cpl_addr;
+
+    if (!s->cplq_base || s->cplq_size == 0) {
+        return;
+    }
+    if (s->cplq_head >= s->cplq_size || s->cplq_tail >= s->cplq_size) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "rvt2: invalid cplq state head=%u tail=%u size=%u\n",
+                      s->cplq_head, s->cplq_tail, s->cplq_size);
+        return;
+    }
+
+    cpl_addr = s->cplq_base + (uint64_t)s->cplq_tail * RVT2_CPL_SIZE;
+    pci_dma_write(&s->pdev, cpl_addr, cpl, sizeof(*cpl));
+    s->cplq_tail = (s->cplq_tail + 1) % s->cplq_size;
+}
+
+static void rvt2_latch_fault(Rvt2State *s, uint64_t seqno, uint32_t status)
+{
+    Rvt2Completion cpl = {
+        .fence_seqno = seqno,
+        .status = status,
+    };
+
+    s->status |= RVT2_STATUS_ERROR;
+    rvt2_write_completion(s, &cpl);
+    rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
+}
+
 /* ---- Mailbox emulation ---- */
 
 static void rvt2_mbox_process(Rvt2State *s)
@@ -73,7 +104,7 @@ static void rvt2_mbox_process(Rvt2State *s)
 
 /* ---- Compute emulation (D = A * B + C) ---- */
 
-static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
+static bool rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
 {
     uint32_t m = desc->m, n = desc->n, k = desc->k;
     uint32_t elements_a, elements_b, elements_c, elements_d;
@@ -84,26 +115,23 @@ static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
     if (desc->opcode != RVT2_OP_TERNARY_MATMUL) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "rvt2: unsupported opcode 0x%x\n", desc->opcode);
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 1; /* error */
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 1);
+        return false;
     }
 
     if (desc->dtype != RVT2_DTYPE_FLOAT32) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "rvt2: unsupported dtype %u (only float32)\n",
                       desc->dtype);
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 2;
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 2);
+        return false;
     }
 
     if (m == 0 || n == 0 || k == 0 || m > 4096 || n > 4096 || k > 4096) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "rvt2: invalid dimensions m=%u n=%u k=%u\n", m, n, k);
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 3;
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 3);
+        return false;
     }
 
     elements_a = m * k;
@@ -119,27 +147,18 @@ static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
     /* DMA read inputs */
     if (pci_dma_read(&s->pdev, desc->input_a_addr,
                      a, elements_a * sizeof(float)) != 0) {
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 4; /* DMA fault */
-        s->status |= RVT2_STATUS_ERROR;
-        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 4);
+        goto fault;
     }
     if (pci_dma_read(&s->pdev, desc->input_b_addr,
                      b, elements_b * sizeof(float)) != 0) {
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 4;
-        s->status |= RVT2_STATUS_ERROR;
-        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 4);
+        goto fault;
     }
     if (pci_dma_read(&s->pdev, desc->input_c_addr,
                      c, elements_c * sizeof(float)) != 0) {
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 4;
-        s->status |= RVT2_STATUS_ERROR;
-        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 4);
+        goto fault;
     }
 
     /* Compute D = A * B + C (naive matmul, row-major) */
@@ -156,36 +175,28 @@ static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
     /* DMA write output */
     if (pci_dma_write(&s->pdev, desc->output_d_addr,
                       d, elements_d * sizeof(float)) != 0) {
-        cpl.fence_seqno = desc->fence_seqno;
-        cpl.status = 4;
-        s->status |= RVT2_STATUS_ERROR;
-        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
-        goto write_cpl;
+        rvt2_latch_fault(s, desc->fence_seqno, 4);
+        goto fault;
     }
 
     cpl.fence_seqno = desc->fence_seqno;
     cpl.status = 0; /* success */
     s->last_completed_seqno = desc->fence_seqno;
+    rvt2_write_completion(s, &cpl);
 
-write_cpl:
-    /* Write completion entry */
-    if (s->cplq_base && s->cplq_size > 0) {
-        uint64_t cpl_addr = s->cplq_base +
-                            (uint64_t)(s->cplq_tail % s->cplq_size) *
-                            RVT2_CPL_SIZE;
-        pci_dma_write(&s->pdev, cpl_addr, &cpl, sizeof(cpl));
-        s->cplq_tail = (s->cplq_tail + 1) % s->cplq_size;
-    }
-
+fault:
     g_free(a);
     g_free(b);
     g_free(c);
     g_free(d);
+    return cpl.status == 0;
 }
 
 static void rvt2_process_cmdq(Rvt2State *s)
 {
+    uint32_t tail_snapshot;
     uint32_t processed = 0;
+    bool faulted = false;
 
     /* Validate queue configuration */
     if (s->cmdq_size == 0 || s->cmdq_base == 0) {
@@ -194,29 +205,49 @@ static void rvt2_process_cmdq(Rvt2State *s)
                           "rvt2: cmdq not configured (base=0x%" PRIx64
                           " size=%u) but has pending work\n",
                           s->cmdq_base, s->cmdq_size);
-            s->status |= RVT2_STATUS_ERROR;
-            rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
+            rvt2_latch_fault(s, 0, 4);
         }
         return;
     }
+    if (s->cmdq_head >= s->cmdq_size || s->cmdq_tail >= s->cmdq_size) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "rvt2: invalid cmdq state head=%u tail=%u size=%u\n",
+                      s->cmdq_head, s->cmdq_tail, s->cmdq_size);
+        rvt2_latch_fault(s, 0, 4);
+        return;
+    }
+    if (!s->cplq_base || s->cplq_size == 0 ||
+        s->cplq_head >= s->cplq_size || s->cplq_tail >= s->cplq_size) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "rvt2: invalid cplq state base=0x%" PRIx64
+                      " head=%u tail=%u size=%u\n",
+                      s->cplq_base, s->cplq_head, s->cplq_tail, s->cplq_size);
+        rvt2_latch_fault(s, 0, 4);
+        return;
+    }
 
-    while (s->cmdq_head != s->cmdq_tail) {
+    tail_snapshot = s->cmdq_tail;
+
+    while (s->cmdq_head != tail_snapshot) {
         Rvt2Descriptor desc;
         uint64_t desc_addr = s->cmdq_base +
-                             (uint64_t)(s->cmdq_head % s->cmdq_size) *
+                             (uint64_t)s->cmdq_head *
                              RVT2_DESC_SIZE;
 
         if (pci_dma_read(&s->pdev, desc_addr, &desc, sizeof(desc)) != 0) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "rvt2: failed to read descriptor at 0x%" PRIx64 "\n",
                           desc_addr);
-            s->status |= RVT2_STATUS_ERROR;
-            rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
+            rvt2_latch_fault(s, 0, 4);
+            faulted = true;
             break;
         }
 
         s->status |= RVT2_STATUS_BUSY;
-        rvt2_process_one_descriptor(s, &desc);
+        if (!rvt2_process_one_descriptor(s, &desc)) {
+            faulted = true;
+            break;
+        }
         s->cmdq_head = (s->cmdq_head + 1) % s->cmdq_size;
         processed++;
     }
@@ -226,6 +257,9 @@ static void rvt2_process_cmdq(Rvt2State *s)
     /* Only raise completion interrupt if we actually processed descriptors */
     if (processed > 0) {
         rvt2_raise_irq(s, RVT2_IRQ_COMPLETION, RVT2_MSIX_VEC_COMPLETION);
+    }
+    if (faulted) {
+        s->cmdq_tail = s->cmdq_head;
     }
 }
 
