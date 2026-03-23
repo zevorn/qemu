@@ -121,18 +121,24 @@ static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
                      a, elements_a * sizeof(float)) != 0) {
         cpl.fence_seqno = desc->fence_seqno;
         cpl.status = 4; /* DMA fault */
+        s->status |= RVT2_STATUS_ERROR;
+        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
         goto write_cpl;
     }
     if (pci_dma_read(&s->pdev, desc->input_b_addr,
                      b, elements_b * sizeof(float)) != 0) {
         cpl.fence_seqno = desc->fence_seqno;
         cpl.status = 4;
+        s->status |= RVT2_STATUS_ERROR;
+        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
         goto write_cpl;
     }
     if (pci_dma_read(&s->pdev, desc->input_c_addr,
                      c, elements_c * sizeof(float)) != 0) {
         cpl.fence_seqno = desc->fence_seqno;
         cpl.status = 4;
+        s->status |= RVT2_STATUS_ERROR;
+        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
         goto write_cpl;
     }
 
@@ -152,6 +158,8 @@ static void rvt2_process_one_descriptor(Rvt2State *s, Rvt2Descriptor *desc)
                       d, elements_d * sizeof(float)) != 0) {
         cpl.fence_seqno = desc->fence_seqno;
         cpl.status = 4;
+        s->status |= RVT2_STATUS_ERROR;
+        rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
         goto write_cpl;
     }
 
@@ -177,6 +185,21 @@ write_cpl:
 
 static void rvt2_process_cmdq(Rvt2State *s)
 {
+    uint32_t processed = 0;
+
+    /* Validate queue configuration */
+    if (s->cmdq_size == 0 || s->cmdq_base == 0) {
+        if (s->cmdq_head != s->cmdq_tail) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "rvt2: cmdq not configured (base=0x%" PRIx64
+                          " size=%u) but has pending work\n",
+                          s->cmdq_base, s->cmdq_size);
+            s->status |= RVT2_STATUS_ERROR;
+            rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
+        }
+        return;
+    }
+
     while (s->cmdq_head != s->cmdq_tail) {
         Rvt2Descriptor desc;
         uint64_t desc_addr = s->cmdq_base +
@@ -195,12 +218,15 @@ static void rvt2_process_cmdq(Rvt2State *s)
         s->status |= RVT2_STATUS_BUSY;
         rvt2_process_one_descriptor(s, &desc);
         s->cmdq_head = (s->cmdq_head + 1) % s->cmdq_size;
+        processed++;
     }
 
     s->status &= ~RVT2_STATUS_BUSY;
 
-    /* Raise completion interrupt */
-    rvt2_raise_irq(s, RVT2_IRQ_COMPLETION, RVT2_MSIX_VEC_COMPLETION);
+    /* Only raise completion interrupt if we actually processed descriptors */
+    if (processed > 0) {
+        rvt2_raise_irq(s, RVT2_IRQ_COMPLETION, RVT2_MSIX_VEC_COMPLETION);
+    }
 }
 
 static void rvt2_compute_timer_cb(void *opaque)
@@ -289,6 +315,9 @@ static uint64_t rvt2_mmio_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case RVT2_REG_MBOX_DATA3:
         val = s->mbox_data[3];
+        break;
+    case RVT2_REG_HDM_SIZE:
+        val = RVT2_HDM_SIZE;
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -411,6 +440,16 @@ static void rvt2_realize(PCIDevice *pdev, Error **errp)
                           "rvt2-mmio", RVT2_BAR0_SIZE);
     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mmio);
 
+    /* BAR2: HDM (device-managed memory, CXL Type-2 stub) */
+    s->hdm_buf = g_malloc0(RVT2_HDM_SIZE);
+    memory_region_init_ram_ptr(&s->hdm, OBJECT(s), "rvt2-hdm",
+                               RVT2_HDM_SIZE, s->hdm_buf);
+    pci_register_bar(pdev, RVT2_HDM_BAR,
+                     PCI_BASE_ADDRESS_SPACE_MEMORY |
+                     PCI_BASE_ADDRESS_MEM_PREFETCH |
+                     PCI_BASE_ADDRESS_MEM_TYPE_64,
+                     &s->hdm);
+
     /* MSI-X on exclusive BAR4 */
     rc = msix_init_exclusive_bar(pdev, RVT2_MSIX_VEC_COUNT, RVT2_MSIX_BAR,
                                  errp);
@@ -436,6 +475,7 @@ static void rvt2_exit(PCIDevice *pdev)
 
     timer_del(&s->compute_timer);
     msix_uninit_exclusive_bar(pdev);
+    g_free(s->hdm_buf);
 }
 
 static void rvt2_class_init(ObjectClass *class, const void *data)

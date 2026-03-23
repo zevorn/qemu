@@ -141,6 +141,13 @@ typedef struct QEMU_PACKED Rvt2Completion {
 #define RVT2_DEFAULT_ENGINE_COUNT   1
 #define RVT2_DEFAULT_CMDQ_MAX      256
 
+/* CXL Type-2 HDM stub */
+#define RVT2_HDM_BAR            2       /* BAR2 for HDM window */
+#define RVT2_HDM_SIZE           (1 * MiB)  /* 1MiB device memory */
+#define RVT2_REG_HDM_BASE_LO   0xA0    /* RO: HDM window base (BAR2 address) */
+#define RVT2_REG_HDM_BASE_HI   0xA4
+#define RVT2_REG_HDM_SIZE      0xA8    /* RO: HDM window size in bytes */
+
 /*
  * Device state
  */
@@ -149,6 +156,10 @@ struct Rvt2State {
 
     /* BAR0: MMIO registers */
     MemoryRegion mmio;
+
+    /* BAR2: HDM (device-managed memory, CXL Type-2 stub) */
+    MemoryRegion hdm;
+    uint8_t *hdm_buf;
 
     /* Register state */
     uint32_t status;
