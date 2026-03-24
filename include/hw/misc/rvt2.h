@@ -80,8 +80,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(Rvt2State, RVT2)
 #define RVT2_MSIX_VEC_COUNT         2
 #define RVT2_MSIX_BAR               4   /* exclusive BAR for MSI-X table */
 
+/* Firmware upload registers (written by driver before LOAD_FW cmd) */
+#define RVT2_REG_FW_ADDR_LO    0xB0    /* RW: firmware DMA address [31:0] */
+#define RVT2_REG_FW_ADDR_HI    0xB4    /* RW: firmware DMA address [63:32] */
+#define RVT2_REG_FW_SIZE       0xB8    /* RW: firmware size in bytes */
+#define RVT2_REG_FAULT_SET     0xBC    /* WO: write 1 to latch STATUS.ERROR */
+
 /* Mailbox commands */
 #define RVT2_MBOX_CMD_NOP           0x00
+#define RVT2_MBOX_CMD_LOAD_FW       0x04
 #define RVT2_MBOX_CMD_INIT          0x01
 #define RVT2_MBOX_CMD_QUERY_CAP     0x02
 #define RVT2_MBOX_CMD_HEARTBEAT     0x03
@@ -183,6 +190,11 @@ struct Rvt2State {
     uint32_t mbox_cmd;
     uint32_t mbox_status;
     uint32_t mbox_data[4];
+
+    /* Firmware upload state */
+    uint64_t fw_addr;
+    uint32_t fw_size;
+    bool fw_blob_loaded;    /* true after successful LOAD_FW */
 
     /* DMA processing timer (simulates async compute) */
     QEMUTimer compute_timer;

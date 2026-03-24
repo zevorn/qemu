@@ -73,11 +73,36 @@ static void rvt2_mbox_process(Rvt2State *s)
         s->mbox_status = RVT2_MBOX_STATUS_DONE;
         break;
 
+    case RVT2_MBOX_CMD_LOAD_FW:
+        /* Firmware upload: verify addr/size and mark blob loaded */
+        if (s->fw_addr == 0 || s->fw_size == 0) {
+            s->mbox_status = RVT2_MBOX_STATUS_ERROR;
+        } else {
+            /* Read first 4 bytes to verify DMA is valid */
+            uint32_t magic = 0;
+            if (pci_dma_read(&s->pdev, s->fw_addr, &magic, 4) != 0) {
+                s->mbox_status = RVT2_MBOX_STATUS_ERROR;
+            } else {
+                s->fw_blob_loaded = true;
+                s->status |= RVT2_STATUS_FW_LOADED;
+                s->mbox_data[0] = s->fw_size;
+                s->mbox_status = RVT2_MBOX_STATUS_DONE;
+            }
+        }
+        break;
+
     case RVT2_MBOX_CMD_INIT:
-        /* Firmware init: mark device ready */
-        s->status |= RVT2_STATUS_FW_LOADED | RVT2_STATUS_READY;
-        s->mbox_data[0] = 0; /* success */
-        s->mbox_status = RVT2_MBOX_STATUS_DONE;
+        /* Firmware init: only succeed if firmware was uploaded first */
+        if (!s->fw_blob_loaded) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "rvt2: INIT without prior LOAD_FW\n");
+            s->status |= RVT2_STATUS_ERROR;
+            s->mbox_status = RVT2_MBOX_STATUS_ERROR;
+        } else {
+            s->status |= RVT2_STATUS_READY;
+            s->mbox_data[0] = 0;
+            s->mbox_status = RVT2_MBOX_STATUS_DONE;
+        }
         break;
 
     case RVT2_MBOX_CMD_QUERY_CAP:
@@ -350,6 +375,15 @@ static uint64_t rvt2_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case RVT2_REG_MBOX_DATA3:
         val = s->mbox_data[3];
         break;
+    case RVT2_REG_FW_ADDR_LO:
+        val = (uint32_t)s->fw_addr;
+        break;
+    case RVT2_REG_FW_ADDR_HI:
+        val = (uint32_t)(s->fw_addr >> 32);
+        break;
+    case RVT2_REG_FW_SIZE:
+        val = s->fw_size;
+        break;
     case RVT2_REG_HDM_BASE_LO:
         /* Return BAR2 address — the PCI core assigns this at realize time */
         val = (uint32_t)s->pdev.io_regions[RVT2_HDM_BAR].addr;
@@ -446,6 +480,21 @@ static void rvt2_mmio_write(void *opaque, hwaddr addr,
         break;
     case RVT2_REG_MBOX_DATA3:
         s->mbox_data[3] = (uint32_t)val;
+        break;
+    case RVT2_REG_FW_ADDR_LO:
+        s->fw_addr = (s->fw_addr & 0xFFFFFFFF00000000ULL) | (val & 0xFFFFFFFF);
+        break;
+    case RVT2_REG_FW_ADDR_HI:
+        s->fw_addr = (s->fw_addr & 0x00000000FFFFFFFFULL) | (val << 32);
+        break;
+    case RVT2_REG_FW_SIZE:
+        s->fw_size = (uint32_t)val;
+        break;
+    case RVT2_REG_FAULT_SET:
+        if (val & 1) {
+            s->status |= RVT2_STATUS_ERROR;
+            rvt2_raise_irq(s, RVT2_IRQ_FAULT, RVT2_MSIX_VEC_FAULT);
+        }
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
