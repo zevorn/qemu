@@ -350,6 +350,13 @@ static uint64_t rvt2_mmio_read(void *opaque, hwaddr addr, unsigned size)
     case RVT2_REG_MBOX_DATA3:
         val = s->mbox_data[3];
         break;
+    case RVT2_REG_HDM_BASE_LO:
+        /* Return BAR2 address — the PCI core assigns this at realize time */
+        val = (uint32_t)s->pdev.io_regions[RVT2_HDM_BAR].addr;
+        break;
+    case RVT2_REG_HDM_BASE_HI:
+        val = (uint32_t)(s->pdev.io_regions[RVT2_HDM_BAR].addr >> 32);
+        break;
     case RVT2_REG_HDM_SIZE:
         val = RVT2_HDM_SIZE;
         break;
