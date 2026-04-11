@@ -172,8 +172,9 @@ static void htif_handle_tohost_write(HTIFState *s, uint64_t val_written)
                  */
                 if (sig_file && begin_sig_addr && end_sig_addr) {
                     if (end_sig_addr <= begin_sig_addr) {
-                        error_report("Invalid HTIF signature range: begin=0x%llx end=0x%llx",
-                                    begin_sig_addr, end_sig_addr);
+                        error_report("Invalid HTIF signature range:"
+                                     " begin=0x%" PRIx64 " end=0x%" PRIx64,
+                                     begin_sig_addr, end_sig_addr);
                         return;
                     }
                     uint64_t sig_len = end_sig_addr - begin_sig_addr;
