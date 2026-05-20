@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/ssi/ssi.h"
+#include "system/block-backend.h"
 #include "qom/object.h"
 
 #define TYPE_K230_SPI "riscv.k230.spi"
@@ -30,6 +31,7 @@ struct K230SpiState {
     qemu_irq flash_cs;
     SSIBus *ssi;
     DeviceState *flash;
+    BlockBackend *blk;
 
     uint32_t regs[K230_SPI_REG_COUNT];
     uint8_t tx_fifo[K230_SPI_FIFO_DEPTH];

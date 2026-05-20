@@ -9,10 +9,13 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
+#include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "system/dma.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/ssi/k230_spi.h"
 
 #define K230_SPI_CTRLR0         0x000
@@ -418,7 +421,13 @@ static void k230_spi_realize(DeviceState *dev, Error **errp)
     }
 
     s->ssi = ssi_create_bus(dev, "spi");
-    s->flash = ssi_create_peripheral(s->ssi, "w25q256");
+    s->flash = qdev_new("w25q256");
+    if (s->blk) {
+        if (!qdev_prop_set_drive_err(s->flash, "drive", s->blk, errp)) {
+            return;
+        }
+    }
+    ssi_realize_and_unref(s->flash, s->ssi, &error_fatal);
     s->flash_cs = qdev_get_gpio_in_named(s->flash, SSI_GPIO_CS, 0);
 
     memory_region_init_io(&s->mmio, OBJECT(dev), &k230_spi_ops, s,
@@ -426,12 +435,17 @@ static void k230_spi_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->mmio);
 }
 
+static const Property k230_spi_properties[] = {
+    DEFINE_PROP_DRIVE("drive", K230SpiState, blk),
+};
+
 static void k230_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = k230_spi_realize;
     device_class_set_legacy_reset(dc, k230_spi_reset);
+    device_class_set_props(dc, k230_spi_properties);
     dc->vmsd = &vmstate_k230_spi;
     dc->desc = "K230 DesignWare SSI controller";
 }
