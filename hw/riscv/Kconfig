@@ -143,6 +143,7 @@ config K230
     select RISCV_APLIC
     select RISCV_IMSIC
     select SERIAL_MM
+    select SIFIVE_TEST
     select UNIMP
     select K230_WDT
     select K230_SDHCI

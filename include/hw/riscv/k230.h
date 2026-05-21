@@ -31,6 +31,7 @@
 #include "hw/misc/k230_timer.h"
 #include "hw/misc/k230_tsensor.h"
 #include "hw/misc/k230_ugzip.h"
+#include "hw/misc/sifive_test.h"
 #include "hw/riscv/riscv_hart.h"
 #include "hw/rtc/k230_rtc.h"
 #include "hw/sd/k230_sdhci.h"
@@ -89,6 +90,7 @@ typedef struct K230MachineState {
 
     /*< public >*/
     K230SoCState soc;
+    SiFiveTestState qemu_finisher;
     Notifier machine_done;
 } K230MachineState;
 

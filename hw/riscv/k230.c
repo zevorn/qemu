@@ -32,6 +32,7 @@
 #include "hw/intc/riscv_aclint.h"
 #include "hw/intc/sifive_plic.h"
 #include "hw/char/serial-mm.h"
+#include "hw/misc/sifive_test.h"
 #include "hw/misc/unimp.h"
 #include "hw/sd/sd.h"
 #include "hw/usb/usb.h"
@@ -44,6 +45,9 @@
 
 #define K230_NOC_QOS_BASE          0x91302000
 #define K230_NOC_QOS_SIZE          0x1000
+
+#define K230_QEMU_FINISHER_ADDR    0x00100000
+#define K230_QEMU_FINISHER_PRIO    1
 
 static const MemMapEntry memmap[] = {
     [K230_DEV_DDRC] =         { 0x00000000,  0x80000000 },
@@ -714,6 +718,15 @@ static void k230_attach_sd_drives(K230MachineState *s)
     k230_attach_sd_drive(s, 0, 1);
 }
 
+static void k230_create_qemu_finisher(K230MachineState *s)
+{
+    SysBusDevice *sbd = SYS_BUS_DEVICE(&s->qemu_finisher);
+
+    sysbus_realize(sbd, &error_fatal);
+    sysbus_mmio_map_overlap(sbd, 0, K230_QEMU_FINISHER_ADDR,
+                            K230_QEMU_FINISHER_PRIO);
+}
+
 static void k230_attach_spi_flash(K230MachineState *s)
 {
     DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
@@ -748,6 +761,7 @@ static void k230_machine_init(MachineState *machine)
     /* Data Memory */
     memory_region_add_subregion(sys_mem, memmap[K230_DEV_DDRC].base,
                                 machine->ram);
+    k230_create_qemu_finisher(s);
 
     k230_attach_sd_drives(s);
 
@@ -757,6 +771,10 @@ static void k230_machine_init(MachineState *machine)
 
 static void k230_machine_instance_init(Object *obj)
 {
+    K230MachineState *s = RISCV_K230_MACHINE(obj);
+
+    object_initialize_child(obj, "qemu-finisher", &s->qemu_finisher,
+                            TYPE_SIFIVE_TEST);
 }
 
 static void k230_machine_class_init(ObjectClass *oc, const void *data)
