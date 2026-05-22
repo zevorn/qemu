@@ -35,6 +35,7 @@
 
 #define K230_GNNE_COMMAND_BASE_OFFSET   0x003a6000
 #define K230_GNNE_RUNTIME_RDATA_BASE    0x10000020
+#define K230_GNNE_RUNTIME_DDR_BASE      0x3c000000
 #define K230_GNNE_RUNTIME_WINDOW_SIZE   (64 * MiB)
 #define K230_GNNE_RDATA_ALIAS_BASE      0xfc000000
 #define K230_GNNE_RDATA_FALLBACK_BASE   0x10000000
@@ -327,6 +328,7 @@ typedef struct K230GnneFrontend {
     uint64_t rdata_shadow_base;
     uint64_t rdata_shadow_size;
     bool rdata_shadow_valid;
+    bool runtime_window;
     K230GnneL2Conf l2_load_conf;
     K230GnneL2Conf l2_load_w_conf;
     K230GnneL2Conf l2_store_conf;
@@ -578,7 +580,8 @@ static void k230_gnne_frontend_init(K230KpuState *s, K230GnneFrontend *fe,
     memset(fe, 0, sizeof(*fe));
     fe->gp[0].valid = true;
     fe->gp[0].value = 0;
-    if (k230_gnne_command_in_runtime_window(command_start)) {
+    fe->runtime_window = k230_gnne_command_in_runtime_window(command_start);
+    if (fe->runtime_window) {
         fe->glb_base = K230_GNNE_RUNTIME_RDATA_BASE;
         fe->glb_base_valid = true;
     } else if (command_start >= K230_GNNE_COMMAND_BASE_OFFSET) {
@@ -713,6 +716,58 @@ static bool k230_gnne_translate_store_dest(K230GnneFrontend *fe,
            k230_gnne_translate_rdata_alias(fe, encoded, physical, logical);
 }
 
+static bool k230_gnne_runtime_ddr_offset(K230GnneFrontend *fe,
+                                         uint64_t logical,
+                                         uint64_t *offset)
+{
+    if (!fe->runtime_window) {
+        return false;
+    }
+
+    if (logical >= K230_GNNE_RDATA_ALIAS_BASE) {
+        logical -= K230_GNNE_RDATA_ALIAS_BASE;
+    }
+
+    if (logical >= K230_GNNE_RUNTIME_WINDOW_SIZE) {
+        return false;
+    }
+
+    *offset = logical;
+    return true;
+}
+
+static bool k230_gnne_runtime_ddr_addr(K230GnneFrontend *fe, uint64_t logical,
+                                       uint64_t *physical)
+{
+    uint64_t offset;
+
+    if (!k230_gnne_runtime_ddr_offset(fe, logical, &offset) ||
+        UINT64_MAX - K230_GNNE_RUNTIME_DDR_BASE < offset) {
+        return false;
+    }
+
+    *physical = K230_GNNE_RUNTIME_DDR_BASE + offset;
+    return true;
+}
+
+static bool k230_gnne_runtime_ddr_source_addr(K230GnneFrontend *fe,
+                                              uint64_t source,
+                                              uint64_t *physical)
+{
+    if (!fe->runtime_window || source >= K230_GNNE_RDATA_ALIAS_BASE) {
+        return false;
+    }
+
+    if (source >= K230_GNNE_RUNTIME_DDR_BASE &&
+        source - K230_GNNE_RUNTIME_DDR_BASE <
+        K230_GNNE_RUNTIME_WINDOW_SIZE) {
+        *physical = source;
+        return true;
+    }
+
+    return k230_gnne_runtime_ddr_addr(fe, source, physical);
+}
+
 static bool k230_gnne_read_scalar(K230GnneFrontend *fe, uint32_t encoded,
                                   unsigned int size, bool sign,
                                   uint32_t *value)
@@ -767,6 +822,12 @@ static bool k230_gnne_source_read(K230GnneFrontend *fe, uint64_t source,
 {
     uint64_t rdata_offset;
     uint64_t physical;
+
+    if (k230_gnne_runtime_ddr_source_addr(fe, source, &physical) &&
+        dma_memory_read(&address_space_memory, physical, buf, size,
+                        MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+        return true;
+    }
 
     if (dma_memory_read(&address_space_memory, source, buf, size,
                         MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
@@ -1531,6 +1592,8 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                                        (uint64_t)w * src_size;
                     uint64_t dst_off = dst_base + dst_line +
                                        (uint64_t)w * dst_size;
+                    uint64_t mirror_base;
+                    uint64_t mirror_off;
                     uint8_t item[4] = {};
                     uint8_t out[4] = {};
 
@@ -1549,6 +1612,28 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                                                      src_off, dst_off,
                                                      rshape, copied);
                         return;
+                    }
+                    if (k230_gnne_runtime_ddr_addr(fe, dst_logical,
+                                                   &mirror_base)) {
+                        if (UINT64_MAX - mirror_base < dst_line ||
+                            UINT64_MAX - mirror_base - dst_line <
+                            (uint64_t)w * dst_size) {
+                            trace_k230_kpu_l2_store_skip(
+                                k230_kpu_name(s), pc,
+                                K230_GNNE_SKIP_OVERFLOW, src_off,
+                                mirror_base, rshape, copied);
+                            return;
+                        }
+                        mirror_off = mirror_base + dst_line +
+                                     (uint64_t)w * dst_size;
+                        if (!k230_gnne_dma_write_bytes(mirror_off, out,
+                                                       dst_size)) {
+                            trace_k230_kpu_l2_store_skip(
+                                k230_kpu_name(s), pc,
+                                K230_GNNE_SKIP_DEST_WRITE, src_off,
+                                mirror_off, rshape, copied);
+                            return;
+                        }
                     }
                     copied += dst_size;
                 }

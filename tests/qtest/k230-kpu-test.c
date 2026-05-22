@@ -32,6 +32,7 @@
 #define K230_GNNE_COMMAND_BASE_OFFSET 0x003a6000
 #define K230_GNNE_RUNTIME_RDATA_BASE 0x10000020
 #define K230_GNNE_RUNTIME_FUNCTION_COMMAND 0x1032b020
+#define K230_GNNE_RUNTIME_DDR_BASE 0x3c000000
 #define K230_GNNE_RDATA_ALIAS_BASE 0xfc000000
 #define K230_GNNE_RDATA_FALLBACK_BASE 0x10000000
 #define K230_GNNE_DONE            0x0000000400000004ULL
@@ -1222,6 +1223,63 @@ static void test_l2_store_accepts_rdata_alias_destination(void)
     for (size_t i = 0; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==,
                         i < sizeof(source) ? source[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_l2_store_runtime_mirrors_to_ddr_source(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x61, 0x62, 0x63, 0x64,
+    };
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x100),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(5, 0, sizeof(source)),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_LW(3, 0, 8),
+        GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 1),
+        GNNE_L2_STORE_CONF(1, 0, 0, 0),
+        GNNE_L2_STORE(3, 2, 0),
+        GNNE_LUI(6, 0x3c000),
+        GNNE_ADDI(7, 0, 0x180),
+        GNNE_L2_LOAD_CONF(1, 0, 0, 0),
+        GNNE_L2_LOAD(7, 6, 0),
+    };
+    uint8_t alias[4];
+    uint8_t ddr[sizeof(source)];
+    uint8_t data[8];
+
+    stl_le_p(alias, K230_GNNE_RDATA_ALIAS_BASE);
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_RDATA_BASE + 8,
+                   alias, sizeof(alias));
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x100,
+                   source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_RUNTIME_RDATA_BASE, 0xa5,
+                 sizeof(data));
+    qtest_memset(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x180, 0xa5,
+                 sizeof(data));
+    qtest_memset(qts, K230_GNNE_RUNTIME_DDR_BASE, 0,
+                 sizeof(source));
+
+    k230_kpu_run_command_bytes_at(qts, K230_GNNE_RUNTIME_FUNCTION_COMMAND,
+                                  (const uint8_t *)commands,
+                                  sizeof(commands));
+    qtest_memread(qts, K230_GNNE_RUNTIME_DDR_BASE, ddr, sizeof(ddr));
+    qtest_memread(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x180, data,
+                  sizeof(data));
+
+    g_assert_cmpmem(ddr, sizeof(ddr), source, sizeof(source));
+    g_assert_cmpmem(data, sizeof(source), source, sizeof(source));
+    for (size_t i = sizeof(source); i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==, 0xa5);
     }
 
     k230_kpu_assert_done_irq(qts);
@@ -3311,6 +3369,8 @@ int main(int argc, char *argv[])
                    test_runtime_rdata_shadow_survives_glb_mutation);
     qtest_add_func("/k230-kpu/l2-store-rdata-alias-destination",
                    test_l2_store_accepts_rdata_alias_destination);
+    qtest_add_func("/k230-kpu/l2-store-runtime-ddr-mirror",
+                   test_l2_store_runtime_mirrors_to_ddr_source);
     qtest_add_func("/k230-kpu/l2-store-conf-latches-stride",
                    test_l2_store_conf_latches_stride);
     qtest_add_func("/k230-kpu/mfu-act1-identity-u8",
