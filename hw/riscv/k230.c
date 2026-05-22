@@ -479,7 +479,12 @@ static void k230_create_flash_xip(K230SoCState *s, DeviceState *dev,
     K230SpiState *spi = &s->spi[K230_SPI_SPI0];
     uint8_t *storage;
 
-    memory_region_init_rom(&s->flash_xip, OBJECT(dev), "k230.flash-xip",
+    /*
+     * The RT-Smart fastboot image uses the XIP window as a mutable flash
+     * staging area during early startup.  Back it with RAM so direct stores
+     * complete while keeping erased flash contents at 0xff by default.
+     */
+    memory_region_init_ram(&s->flash_xip, OBJECT(dev), "k230.flash-xip",
                            size, &error_fatal);
     storage = memory_region_get_ram_ptr(&s->flash_xip);
     memset(storage, 0xff, size);
@@ -781,7 +786,7 @@ static void k230_soc_realize(DeviceState *dev, Error **errp)
                               K230_GNNE_COMMAND_START,
                               K230_GNNE_COMMAND_END,
                               K230_GNNE_COMMAND_HI,
-                              false, false, errp)) {
+                              true, false, errp)) {
         return;
     }
     if (!k230_create_regs(s, K230_REGS_HDI, memmap[K230_DEV_HDI].base,
