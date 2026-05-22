@@ -1656,6 +1656,56 @@ static bool k230_gnne_mfu_act1_value(uint64_t arg, uint32_t channel,
     return true;
 }
 
+static bool k230_gnne_mfu_act1_segment_value(uint64_t arg, uint32_t channel,
+                                             double value, uint32_t shift,
+                                             double *result)
+{
+    const unsigned int segments = 16;
+    uint64_t base;
+    double threshold;
+    double slope;
+    double bias;
+    double lower;
+    double upper;
+    unsigned int segment = segments - 1;
+
+    if (umul64_overflow((uint64_t)channel, (3 * segments + 1) * 2,
+                        &base) ||
+        UINT64_MAX - arg < base) {
+        return false;
+    }
+    base += arg;
+
+    for (unsigned int i = 0; i < segments - 1; i++) {
+        if (!k230_gnne_read_fp16(base + i * 2, &threshold)) {
+            return false;
+        }
+        if (threshold > value) {
+            segment = i;
+            break;
+        }
+    }
+
+    if (!k230_gnne_read_fp16(base + 2 * (segments - 1) + segment * 2,
+                             &slope) ||
+        !k230_gnne_read_fp16(base + 2 * (2 * (segments - 1) + 1) +
+                             segment * 2, &bias) ||
+        !k230_gnne_read_fp16(base + 2 * (3 * segments - 1), &lower) ||
+        !k230_gnne_read_fp16(base + 2 * 3 * segments, &upper)) {
+        return false;
+    }
+
+    value = value * slope * k230_gnne_pow2(shift) + bias;
+    if (value < lower) {
+        value = lower;
+    } else if (value > upper) {
+        value = upper;
+    }
+
+    *result = value;
+    return true;
+}
+
 static bool k230_gnne_mfu_write_quant(uint64_t dst, uint64_t index,
                                       uint32_t quant_type, double value,
                                       unsigned int *written)
@@ -1927,8 +1977,11 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
                 value += value2;
             }
         }
-        if (!k230_gnne_mfu_act1_value(arg_base, channel, value, quant_shift,
-                                      &value) ||
+        if ((conf->is_16_segments ?
+             !k230_gnne_mfu_act1_segment_value(arg_base, channel, value,
+                                               quant_shift, &value) :
+             !k230_gnne_mfu_act1_value(arg_base, channel, value, quant_shift,
+                                       &value)) ||
             !k230_gnne_mfu_write_quant(dst_base, index, conf->quant_type,
                                        value, &element_size)) {
             return;

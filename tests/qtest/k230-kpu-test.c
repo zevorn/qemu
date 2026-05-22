@@ -109,6 +109,10 @@
     (K230_GNNE_SYNTH_GLB_BASE + 0x1500)
 #define K230_GNNE_SYNTH_TRANSPOSE_OUTPUT \
     (K230_GNNE_SYNTH_GLB_BASE + 0x1600)
+#define K230_GNNE_SYNTH_MFU_SEG_ARG \
+    (K230_GNNE_SYNTH_GLB_BASE + 0x1700)
+#define K230_GNNE_SYNTH_MFU_SEG_OUTPUT \
+    (K230_GNNE_SYNTH_GLB_BASE + 0x1780)
 #define K230_GNNE_SYNTH_SOURCE    0x02000000
 
 #define GNNE_FIELD(value, shift)   ((uint32_t)(value) << (shift))
@@ -1581,6 +1585,69 @@ static void test_mfu_act1_mul_fp16_two_l2_sources(void)
                   sizeof(data));
 
     g_assert_cmpmem(data, sizeof(data), expected, sizeof(expected));
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_mfu_act1_segment_linefit_fp16(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x00, 0x00,             /* fp16 0 */
+        0x00, 0x3e,             /* fp16 1.5 */
+    };
+    const uint8_t expected[] = {
+        0x00, 0x3c,             /* fp16 1 */
+        0x00, 0x45,             /* fp16 5 */
+    };
+    uint8_t table[98] = {};
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x100),
+        GNNE_ADDI(3, 0, 0x400),
+        GNNE_LUI(6, 1),
+        GNNE_ADDI(6, 6, 0x780),
+        GNNE_LUI(7, 1),
+        GNNE_ADDI(7, 7, 0x700),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(5, 0, 2),
+        GNNE_ADDI(10, 0, 0),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0),
+        GNNE_MFU_ACT1_CONF_STRIDE(0, 0, 0),
+        GNNE_MFU_ACT1_CONF_DEST(5, 0),
+        GNNE_MFU_ACT1_CONF_DEQ(10, 0, 0, 0, 0),
+        GNNE_MFU_ACT1_CONF_QUANT(0, 0),
+        GNNE_MFU_ACT1_CONF(0, 0, 1),
+        GNNE_MFU_ACT1_COMPUTE(6, 3, 0, 7),
+    };
+    uint8_t data[8];
+
+    stw_le_p(table + 0, 0x3c00);     /* threshold 1 */
+    stw_le_p(table + 2, 0x4000);     /* threshold 2 */
+    stw_le_p(table + 30, 0x3c00);    /* segment 0 slope 1 */
+    stw_le_p(table + 32, 0x4000);    /* segment 1 slope 2 */
+    stw_le_p(table + 62, 0x3c00);    /* segment 0 bias 1 */
+    stw_le_p(table + 64, 0x4000);    /* segment 1 bias 2 */
+    stw_le_p(table + 94, 0x0000);    /* lower 0 */
+    stw_le_p(table + 96, 0x5c00);    /* upper 256 */
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_MFU_SOURCE, source,
+                   sizeof(source));
+    qtest_memwrite(qts, K230_GNNE_SYNTH_MFU_SEG_ARG, table,
+                   sizeof(table));
+    qtest_memset(qts, K230_GNNE_SYNTH_MFU_SEG_OUTPUT, 0xa5,
+                 sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_MFU_SEG_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(expected) ? expected[i] : 0xa5);
+    }
 
     k230_kpu_assert_done_irq(qts);
     k230_kpu_clear_done_irq(qts);
@@ -3256,6 +3323,8 @@ int main(int argc, char *argv[])
                    test_mfu_act1_fp16_roundtrip);
     qtest_add_func("/k230-kpu/mfu-act1-mul-fp16-two-l2-sources",
                    test_mfu_act1_mul_fp16_two_l2_sources);
+    qtest_add_func("/k230-kpu/mfu-act1-segment-linefit-fp16",
+                   test_mfu_act1_segment_linefit_fp16);
     qtest_add_func("/k230-kpu/mfu-pdp1-average-u8",
                    test_mfu_pdp1_average_u8);
     qtest_add_func("/k230-kpu/mfu-pdp1-min-fp16-sum-i16",
