@@ -2052,6 +2052,8 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t count;
     uint64_t written = 0;
     uint64_t head = 0;
+    uint64_t source_head = 0;
+    uint64_t arg_head = 0;
     double scale;
     double scale2 = 0.0;
     bool binary_source;
@@ -2126,6 +2128,36 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
 
     scale = k230_gnne_fp16_to_double(scale_raw);
     scale2 = k230_gnne_fp16_to_double(scale2_raw);
+
+    if (!conf->src2[0].source_type) {
+        unsigned int source_size;
+
+        if (k230_gnne_quant_type_size(deq->quant_type, &source_size)) {
+            uint8_t source_head_buf[sizeof(source_head)] = {};
+            uint64_t source_bytes;
+
+            if (!umul64_overflow(count, source_size, &source_bytes)) {
+                source_bytes = MIN(source_bytes,
+                                   (uint64_t)sizeof(source_head_buf));
+                if (source_bytes &&
+                    k230_gnne_dma_read_bytes(src_base, source_head_buf,
+                                             source_bytes)) {
+                    source_head = k230_gnne_head_le_p(source_head_buf,
+                                                      source_bytes);
+                }
+            }
+        }
+    }
+    {
+        uint8_t arg_head_buf[sizeof(arg_head)] = {};
+
+        if (k230_gnne_dma_read_bytes(arg_base, arg_head_buf,
+                                     sizeof(arg_head_buf))) {
+            arg_head = k230_gnne_head_le_p(arg_head_buf,
+                                           sizeof(arg_head_buf));
+        }
+    }
+
     for (uint64_t index = 0; index < count; index++) {
         double value;
         double value2;
@@ -2176,6 +2208,8 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
     trace_k230_kpu_mfu_act1(k230_kpu_name(s), pc, src_logical, dst_logical,
                             arg_logical, count, deq->quant_type,
                             conf->quant_type, written, head);
+    trace_k230_kpu_mfu_act1_inputs(k230_kpu_name(s), pc, source_head,
+                                   arg_head);
     fe->mfu_act1s++;
     fe->output_bytes += written;
 }
