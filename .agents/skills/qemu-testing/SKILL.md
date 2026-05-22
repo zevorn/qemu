@@ -44,6 +44,38 @@ To run individual TCG tests for a specific architecture:
 Individual functional tests can be run directly using the run script although from the source directory:
 - **Example**: `./builds/all/run tests/functional/aarch64/test_virt_vbsa.py`
 
+## K230 Downstream Modeling Checks
+
+For local K230 device-model work, prefer the focused qtests before broader
+test suites:
+
+```bash
+ninja -C build qemu-system-riscv64 tests/qtest/k230-sysctl-test
+./build/pyvenv/bin/meson test \
+  qtest-riscv64/k230-sysctl-test \
+  qtest-riscv64/k230-wdt-test \
+  -C build --print-errorlogs
+git diff --check
+```
+
+When validating KPU/GNNE behavior against the RT-Smart AI case, run the
+`k230` machine with `-smp 2` and enable both command-range and completion-page
+traces:
+
+```bash
+build/qemu-system-riscv64 \
+  -machine k230 -smp 2 \
+  -bios /Users/zevorn/k230-project/images/rtt-big-face/fw_payload.bin \
+  -display none \
+  -trace k230_regs_irq_command \
+  -trace k230_regs_completion_zero_page
+```
+
+Use the command buffer traces to infer modeled output pages. Do not assume a
+single low-bit tag identifies KPU output buffers; observed K230 command words
+use several low-bit patterns, so qtests should constrain the explicit output
+window and referenced pages instead.
+
 ### Environment Variables
 - `V=1` for verbose output from tests.
 - `SPEED=slow` to run slower tests that are normally skipped.
@@ -53,4 +85,3 @@ Individual functional tests can be run directly using the run script although fr
 1. **Summary**: State whether the build and tests passed or failed.
 2. **Failure Excerpts**: If any task fails, include relevant excerpts from the logs (e.g., compiler errors, test failures).
 3. **Full Paths**: Always provide the **absolute file paths** to the full logs and result sets for further inspection.
-
