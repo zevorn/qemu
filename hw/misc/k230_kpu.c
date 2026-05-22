@@ -3194,6 +3194,44 @@ static bool k230_gnne_pu_read_input(uint64_t addr, uint32_t quant_type,
     }
 }
 
+static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
+                                       uint32_t fetch_encoded,
+                                       uint64_t *input_base)
+{
+    K230GnneShape *shape;
+    K230GnneStride stride;
+    uint32_t dm_encoded;
+    uint64_t dm_base;
+    uint64_t span;
+    bool valid;
+
+    if (!fe->dm_load_l1.valid ||
+        fe->dm_load_l1.rshape >= K230_GNNE_SHAPE_COUNT ||
+        !fe->shape[fe->dm_load_l1.rshape].valid ||
+        !k230_gnne_stride_value(fe, fe->dm_load_l1_conf.rstride_s,
+                                &stride)) {
+        return false;
+    }
+
+    shape = &fe->shape[fe->dm_load_l1.rshape];
+    if (!k230_gnne_packed_stride_footprint(shape, &stride, &span) ||
+        fetch_encoded >= span) {
+        return false;
+    }
+
+    dm_encoded = k230_gnne_gp(fe, fe->dm_load_l1.raddr_s, &valid);
+    if (!valid || !k230_gnne_translate(fe, dm_encoded, &dm_base, NULL)) {
+        return false;
+    }
+
+    if (UINT64_MAX - dm_base < fetch_encoded) {
+        return false;
+    }
+
+    *input_base = dm_base + fetch_encoded;
+    return true;
+}
+
 static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
                                  uint32_t word, uint64_t pc)
 {
@@ -3351,9 +3389,18 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
         PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_GP, fe->dm_load_w.raddr_bw, 0, 2);
     }
     input_zp = k230_gnne_gp(fe, pu->rbx, &valid);
-    if (!valid ||
-        !k230_gnne_translate(fe, input_encoded, &input_base, NULL) ||
-        !k230_gnne_translate(fe, weight_encoded, &weight_base, NULL) ||
+    if (!valid) {
+        PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
+                        weight_encoded, weight_zp_encoded);
+    }
+    if (!deconv &&
+        k230_gnne_pu_l1_input_base(fe, input_encoded, &input_base)) {
+        /* Low fetchif sources are offsets in the current IF/L1 buffer. */
+    } else if (!k230_gnne_translate(fe, input_encoded, &input_base, NULL)) {
+        PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
+                        weight_encoded, weight_zp_encoded);
+    }
+    if (!k230_gnne_translate(fe, weight_encoded, &weight_base, NULL) ||
         !k230_gnne_translate(fe, weight_zp_encoded, &weight_zp_base, NULL)) {
         PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
                         weight_encoded, weight_zp_encoded);
