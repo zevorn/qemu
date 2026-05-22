@@ -32,6 +32,11 @@
 #define K230_GNNE_COMMAND_BASE_OFFSET 0x003a6000
 #define K230_GNNE_RUNTIME_RDATA_BASE 0x10000020
 #define K230_GNNE_RUNTIME_FUNCTION_COMMAND 0x1032b020
+#define K230_GNNE_RUNTIME_ARG_TABLE 0x80000000
+#define K230_GNNE_RUNTIME_DIRECT_SOURCE \
+    (K230_GNNE_RUNTIME_RDATA_BASE + 0x500000)
+#define K230_GNNE_RUNTIME_DIRECT_OUTPUT \
+    (K230_GNNE_RUNTIME_RDATA_BASE + 0x501000)
 #define K230_GNNE_RUNTIME_DDR_BASE 0x3c000000
 #define K230_GNNE_RDATA_ALIAS_BASE 0xfc000000
 #define K230_GNNE_RDATA_FALLBACK_BASE 0x10000000
@@ -1323,6 +1328,60 @@ static void test_runtime_rdata_shadow_survives_glb_mutation(void)
     g_assert_cmphex(data[0], ==, source[0]);
     for (size_t i = 1; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==, 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_runtime_arg_table_drives_direct_io(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x41, 0x42, 0x43, 0x44,
+    };
+    uint8_t commands[160];
+    uint8_t table[16] = {};
+    uint8_t data[8];
+    size_t command_size = 0;
+
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(2, 0, 0x200));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(4, 0, 1));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_ADDI(5, 0, sizeof(source)));
+    k230_kpu_command_u32(commands, &command_size, GNNE_MMU_CONF(0, 4, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LW(6, 0, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_SS_PACK_STRIDE(5, 5, 5, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_SS_PACK_STRIDE(5, 5, 5, 1));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_L2_LOAD_CONF(1, 0, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_L2_LOAD(2, 6, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LW(7, 0, 4));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_L2_STORE_CONF(1, 0, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_L2_STORE(7, 2, 0));
+
+    stl_le_p(table, K230_GNNE_RUNTIME_DIRECT_SOURCE);
+    stl_le_p(table + 4, K230_GNNE_RUNTIME_DIRECT_OUTPUT);
+    stl_le_p(table + 8, K230_GNNE_RUNTIME_RDATA_BASE);
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_ARG_TABLE, table, sizeof(table));
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DIRECT_SOURCE,
+                   source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_RUNTIME_DIRECT_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_command_bytes_at(qts, K230_GNNE_RUNTIME_FUNCTION_COMMAND,
+                                  commands, command_size);
+    qtest_memread(qts, K230_GNNE_RUNTIME_DIRECT_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(source) ? source[i] : 0xa5);
     }
 
     k230_kpu_assert_done_irq(qts);
@@ -3520,6 +3579,8 @@ int main(int argc, char *argv[])
                    test_runtime_function_command_uses_runtime_base);
     qtest_add_func("/k230-kpu/runtime-rdata-shadow-survives-glb-mutation",
                    test_runtime_rdata_shadow_survives_glb_mutation);
+    qtest_add_func("/k230-kpu/runtime-arg-table-direct-io",
+                   test_runtime_arg_table_drives_direct_io);
     qtest_add_func("/k230-kpu/l2-store-rdata-alias-destination",
                    test_l2_store_accepts_rdata_alias_destination);
     qtest_add_func("/k230-kpu/l2-store-runtime-ddr-mirror",

@@ -39,6 +39,11 @@
 #define K230_GNNE_RUNTIME_WINDOW_SIZE   (64 * MiB)
 #define K230_GNNE_RDATA_ALIAS_BASE      0xfc000000
 #define K230_GNNE_RDATA_FALLBACK_BASE   0x10000000
+#define K230_GNNE_RUNTIME_ARG_TABLE_BASE 0x80000000
+#define K230_GNNE_RUNTIME_ARG_PREFIX    64
+#define K230_GNNE_RUNTIME_ARG_WORDS     (K230_GNNE_RUNTIME_ARG_PREFIX / 4)
+#define K230_GNNE_RUNTIME_ARG_MIN_ADDRS 2
+#define K230_GNNE_RUNTIME_ARG_MAX_ADDRS (K230_GNNE_RUNTIME_ARG_WORDS - 2)
 #define K230_GNNE_MAX_COMMAND_SIZE      (16 * MiB)
 #define K230_GNNE_MAX_OUTPUT_SIZE       (64 * MiB)
 #define K230_GNNE_GLB_CACHE_SIZE        (4 * MiB)
@@ -67,6 +72,7 @@
 typedef struct K230GnneScalar {
     uint32_t value;
     bool valid;
+    bool direct_physical;
 } K230GnneScalar;
 
 typedef struct K230GnneShape {
@@ -330,6 +336,8 @@ typedef struct K230GnneFrontend {
     uint64_t rdata_shadow_base;
     uint64_t rdata_shadow_size;
     bool rdata_shadow_valid;
+    uint64_t runtime_arg_base;
+    bool runtime_arg_base_valid;
     bool runtime_window;
     K230GnneL2Conf l2_load_conf;
     K230GnneL2Conf l2_load_w_conf;
@@ -522,6 +530,70 @@ static bool k230_gnne_command_in_runtime_window(uint64_t command_start)
            K230_GNNE_RUNTIME_WINDOW_SIZE;
 }
 
+static bool k230_gnne_runtime_phys_candidate(K230GnneFrontend *fe,
+                                             uint32_t value)
+{
+    if (!fe->runtime_window || !value) {
+        return false;
+    }
+
+    if (fe->glb_base_valid && value >= fe->glb_base &&
+        value - fe->glb_base < K230_GNNE_RUNTIME_WINDOW_SIZE) {
+        return true;
+    }
+
+    return value >= K230_GNNE_RUNTIME_DDR_BASE &&
+           value - K230_GNNE_RUNTIME_DDR_BASE <
+           K230_GNNE_RUNTIME_WINDOW_SIZE;
+}
+
+static bool k230_gnne_find_runtime_arg_table(K230KpuState *s,
+                                             K230GnneFrontend *fe)
+{
+    uint8_t table[K230_GNNE_RUNTIME_ARG_PREFIX];
+    uint32_t words[K230_GNNE_RUNTIME_ARG_WORDS];
+    uint32_t addr_words = 0;
+    uint32_t rdata_base;
+
+    if (!fe->runtime_window || !fe->rdata_base_valid ||
+        fe->rdata_base > UINT32_MAX) {
+        return false;
+    }
+
+    if (dma_memory_read(&address_space_memory,
+                        K230_GNNE_RUNTIME_ARG_TABLE_BASE,
+                        table, sizeof(table),
+                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        return false;
+    }
+
+    for (unsigned int i = 0; i < G_N_ELEMENTS(words); i++) {
+        words[i] = ldl_le_p(table + i * sizeof(words[0]));
+    }
+
+    rdata_base = fe->rdata_base;
+    while (addr_words < K230_GNNE_RUNTIME_ARG_MAX_ADDRS &&
+           words[addr_words] != rdata_base) {
+        if (!k230_gnne_runtime_phys_candidate(fe, words[addr_words])) {
+            return false;
+        }
+        addr_words++;
+    }
+
+    if (addr_words < K230_GNNE_RUNTIME_ARG_MIN_ADDRS ||
+        words[addr_words] != rdata_base ||
+        words[addr_words + 1] != 0) {
+        return false;
+    }
+
+    fe->runtime_arg_base = K230_GNNE_RUNTIME_ARG_TABLE_BASE;
+    fe->runtime_arg_base_valid = true;
+    trace_k230_kpu_runtime_arg_table(
+        k230_kpu_name(s), fe->runtime_arg_base, addr_words,
+        words[0], words[1], words[2], words[3]);
+    return true;
+}
+
 static void k230_gnne_select_rdata_base(K230GnneFrontend *fe)
 {
     fe->rdata_base = fe->glb_base;
@@ -606,6 +678,7 @@ static void k230_gnne_frontend_init(K230KpuState *s, K230GnneFrontend *fe,
                 fe->rdata_shadow_valid = true;
             }
         }
+        k230_gnne_find_runtime_arg_table(s, fe);
         fe->glb_cache = g_malloc(fe->glb_cache_size);
         if (dma_memory_read(&address_space_memory, fe->glb_cache_base,
                             fe->glb_cache, fe->glb_cache_size,
@@ -640,8 +713,16 @@ static uint32_t k230_gnne_gp(K230GnneFrontend *fe, unsigned int reg,
     return fe->gp[reg].value;
 }
 
-static void k230_gnne_set_gp(K230GnneFrontend *fe, unsigned int reg,
-                             uint32_t value, bool valid)
+static bool k230_gnne_gp_direct_physical(K230GnneFrontend *fe,
+                                         unsigned int reg)
+{
+    return reg < K230_GNNE_GP_COUNT && fe->gp[reg].valid &&
+           fe->gp[reg].direct_physical;
+}
+
+static void k230_gnne_set_gp_ex(K230GnneFrontend *fe, unsigned int reg,
+                                uint32_t value, bool valid,
+                                bool direct_physical)
 {
     if (reg >= K230_GNNE_GP_COUNT) {
         return;
@@ -650,11 +731,19 @@ static void k230_gnne_set_gp(K230GnneFrontend *fe, unsigned int reg,
     if (reg == 0) {
         fe->gp[0].value = 0;
         fe->gp[0].valid = true;
+        fe->gp[0].direct_physical = false;
         return;
     }
 
     fe->gp[reg].value = value;
     fe->gp[reg].valid = valid;
+    fe->gp[reg].direct_physical = valid && direct_physical;
+}
+
+static void k230_gnne_set_gp(K230GnneFrontend *fe, unsigned int reg,
+                             uint32_t value, bool valid)
+{
+    k230_gnne_set_gp_ex(fe, reg, value, valid, false);
 }
 
 static bool k230_gnne_translate(K230GnneFrontend *fe, uint32_t encoded,
@@ -716,6 +805,24 @@ static bool k230_gnne_translate_store_dest(K230GnneFrontend *fe,
 {
     return k230_gnne_translate(fe, encoded, physical, logical) ||
            k230_gnne_translate_rdata_alias(fe, encoded, physical, logical);
+}
+
+static bool k230_gnne_translate_direct_physical(K230GnneFrontend *fe,
+                                                uint32_t encoded,
+                                                uint64_t *physical,
+                                                uint64_t *logical)
+{
+    if (!k230_gnne_runtime_phys_candidate(fe, encoded)) {
+        return false;
+    }
+
+    if (physical) {
+        *physical = encoded;
+    }
+    if (logical) {
+        *logical = encoded;
+    }
+    return true;
 }
 
 static bool k230_gnne_runtime_ddr_offset(K230GnneFrontend *fe,
@@ -825,12 +932,34 @@ static bool k230_gnne_l2_load_w_synth_arg(K230GnneFrontend *fe,
     return true;
 }
 
+static uint32_t k230_gnne_scalar_raw(const uint8_t *buf, unsigned int size)
+{
+    switch (size) {
+    case 4:
+        return ldl_le_p(buf);
+    case 2:
+        return lduw_le_p(buf);
+    case 1:
+        return buf[0];
+    default:
+        return 0;
+    }
+}
+
 static bool k230_gnne_read_scalar(K230GnneFrontend *fe, uint32_t encoded,
                                   unsigned int size, bool sign,
-                                  uint32_t *value)
+                                  uint64_t pc, uint32_t *value,
+                                  bool *direct_physical)
 {
     uint64_t logical;
+    uint64_t physical;
     uint8_t buf[4] = {};
+    uint8_t shadow_buf[4] = {};
+    uint8_t live_buf[4] = {};
+
+    if (direct_physical) {
+        *direct_physical = false;
+    }
 
     if (size > sizeof(buf) ||
         !k230_gnne_translate(fe, encoded, NULL, &logical) ||
@@ -839,13 +968,43 @@ static bool k230_gnne_read_scalar(K230GnneFrontend *fe, uint32_t encoded,
         return false;
     }
 
-    if (k230_gnne_rdata_shadow_read(fe, fe->rdata_base + logical, buf,
-                                    size)) {
+    if (fe->runtime_arg_base_valid &&
+        logical < K230_GNNE_RUNTIME_ARG_PREFIX &&
+        UINT64_MAX - fe->runtime_arg_base >= logical) {
+        physical = fe->runtime_arg_base + logical;
+        if (dma_memory_read(&address_space_memory, physical, buf, size,
+                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
+            if (k230_gnne_rdata_shadow_read(fe, fe->rdata_base + logical,
+                                            shadow_buf, size) &&
+                memcmp(shadow_buf, buf, size)) {
+                trace_k230_kpu_rdata_shadow_diff(
+                    pc, encoded, logical,
+                    k230_gnne_scalar_raw(shadow_buf, size),
+                    k230_gnne_scalar_raw(buf, size), size);
+            }
+            if (direct_physical && size == sizeof(uint32_t) &&
+                k230_gnne_runtime_phys_candidate(fe, ldl_le_p(buf))) {
+                *direct_physical = true;
+            }
+            goto decode;
+        }
+    }
+
+    physical = fe->rdata_base + logical;
+    if (k230_gnne_rdata_shadow_read(fe, physical, shadow_buf, size)) {
+        if (fe->runtime_window && logical < K230_GNNE_RUNTIME_ARG_PREFIX &&
+            dma_memory_read(&address_space_memory, physical, live_buf, size,
+                            MEMTXATTRS_UNSPECIFIED) == MEMTX_OK &&
+            memcmp(shadow_buf, live_buf, size)) {
+            trace_k230_kpu_rdata_shadow_diff(
+                pc, encoded, logical, k230_gnne_scalar_raw(shadow_buf, size),
+                k230_gnne_scalar_raw(live_buf, size), size);
+        }
+        memcpy(buf, shadow_buf, size);
         goto decode;
     }
 
-    if (dma_memory_read(&address_space_memory, fe->rdata_base + logical,
-                        buf, size,
+    if (dma_memory_read(&address_space_memory, physical, buf, size,
                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         return false;
     }
@@ -1586,6 +1745,7 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t total_count;
     uint64_t copied = 0;
     bool valid;
+    bool dst_direct_physical;
 
     src_encoded = k230_gnne_gp(fe, raddr_s, &valid);
     if (!valid) {
@@ -1595,6 +1755,7 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
         return;
     }
     dst_encoded = k230_gnne_gp(fe, raddr_d, &valid);
+    dst_direct_physical = k230_gnne_gp_direct_physical(fe, raddr_d);
     if (!valid) {
         trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
                                      K230_GNNE_SKIP_DST_GP, src_encoded, 0,
@@ -1613,8 +1774,14 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                                      src_encoded, 0, rshape, copied);
         return;
     }
-    if (!k230_gnne_translate_store_dest(fe, dst_encoded, &dst_base,
-                                        &dst_logical)) {
+    if (dst_direct_physical) {
+        valid = k230_gnne_translate_direct_physical(fe, dst_encoded,
+                                                    &dst_base, &dst_logical);
+    } else {
+        valid = k230_gnne_translate_store_dest(fe, dst_encoded, &dst_base,
+                                               &dst_logical);
+    }
+    if (!valid) {
         trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
                                      K230_GNNE_SKIP_DST_TRANSLATE,
                                      src_logical, dst_encoded, rshape,
@@ -3835,6 +4002,9 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
     bool left_valid;
     bool right_valid;
     bool valid;
+    bool direct_physical;
+    bool left_direct;
+    bool right_direct;
 
     fe->instructions++;
 
@@ -3853,32 +4023,38 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
         rs = extract32(word, 12, 5);
         left = k230_gnne_gp(fe, rs, &left_valid);
         value = left + sextract32(word, 20, 12);
+        direct_physical = false;
         switch (extract32(word, 17, 3)) {
         case 0:
             valid = left_valid &&
-                    k230_gnne_read_scalar(fe, value, 4, false, &value);
+                    k230_gnne_read_scalar(fe, value, 4, false, pc, &value,
+                                          &direct_physical);
             break;
         case 1:
             valid = left_valid &&
-                    k230_gnne_read_scalar(fe, value, 2, true, &value);
+                    k230_gnne_read_scalar(fe, value, 2, true, pc, &value,
+                                          &direct_physical);
             break;
         case 2:
             valid = left_valid &&
-                    k230_gnne_read_scalar(fe, value, 2, false, &value);
+                    k230_gnne_read_scalar(fe, value, 2, false, pc, &value,
+                                          &direct_physical);
             break;
         case 3:
             valid = left_valid &&
-                    k230_gnne_read_scalar(fe, value, 1, true, &value);
+                    k230_gnne_read_scalar(fe, value, 1, true, pc, &value,
+                                          &direct_physical);
             break;
         case 4:
             valid = left_valid &&
-                    k230_gnne_read_scalar(fe, value, 1, false, &value);
+                    k230_gnne_read_scalar(fe, value, 1, false, pc, &value,
+                                          &direct_physical);
             break;
         default:
             valid = false;
             break;
         }
-        k230_gnne_set_gp(fe, rd, value, valid);
+        k230_gnne_set_gp_ex(fe, rd, value, valid, direct_physical);
         break;
     case 0x0c:
         rd = extract32(word, 7, 5);
@@ -3886,13 +4062,18 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
         rs2 = extract32(word, 22, 5);
         left = k230_gnne_gp(fe, rs1, &left_valid);
         right = k230_gnne_gp(fe, rs2, &right_valid);
+        left_direct = k230_gnne_gp_direct_physical(fe, rs1);
+        right_direct = k230_gnne_gp_direct_physical(fe, rs2);
+        direct_physical = false;
         valid = left_valid && right_valid;
         switch (extract32(word, 17, 5)) {
         case 0:
             value = left + right;
+            direct_physical = left_direct ^ right_direct;
             break;
         case 1:
             value = left - right;
+            direct_physical = left_direct && !right_direct;
             break;
         case 2:
             value = left * right;
@@ -3902,7 +4083,7 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
             value = 0;
             break;
         }
-        k230_gnne_set_gp(fe, rd, value, valid);
+        k230_gnne_set_gp_ex(fe, rd, value, valid, direct_physical);
         break;
     case 0x0e:
         if (extract32(word, 17, 3) != 0) {
@@ -3912,7 +4093,8 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
         rs = extract32(word, 12, 5);
         left = k230_gnne_gp(fe, rs, &left_valid);
         value = left + sextract32(word, 20, 12);
-        k230_gnne_set_gp(fe, rd, value, left_valid);
+        k230_gnne_set_gp_ex(fe, rd, value, left_valid,
+                            k230_gnne_gp_direct_physical(fe, rs));
         break;
     case 0x40:
         if (extract32(word, 27, 3) >= K230_GNNE_SHAPE_COUNT) {
