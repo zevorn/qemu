@@ -37,6 +37,7 @@
 #define CSR_TH_MCINDEX         0x7d3
 #define CSR_TH_MCDATA0         0x7d4
 #define CSR_TH_MCDATA1         0x7d5
+#define CSR_TH_MCPER           0x7d9
 #define CSR_TH_MSMPR           0x7f3
 #define CSR_TH_CPUID           0xfc0
 #define CSR_TH_MAPBADDR        0xfc1
@@ -218,6 +219,11 @@ const RISCVCSR th_csr_list[] = {
         .csrno = CSR_TH_MCDATA1,
         .insertion_test = test_thead_mvendorid,
         .csr_ops = { "th.mcdata1", mmode, read_unimp_th_csr }
+    },
+    {
+        .csrno = CSR_TH_MCPER,
+        .insertion_test = test_thead_mvendorid,
+        .csr_ops = { "th.mcper", mmode, read_unimp_th_csr }
     },
     {
         .csrno = CSR_TH_MSMPR,
