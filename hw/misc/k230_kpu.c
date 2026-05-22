@@ -2125,6 +2125,60 @@ static uint32_t k230_gnne_mfu_channel(K230GnneFrontend *fe, uint64_t index)
     return (index / plane) % shape->c;
 }
 
+static bool k230_gnne_packed_offset4(K230GnneStride *stride, uint32_t n,
+                                     uint32_t c, uint32_t h, uint32_t w,
+                                     uint64_t *offset);
+
+static bool k230_gnne_linear_coords4(const K230GnneShape *shape,
+                                     uint64_t index, uint32_t *n,
+                                     uint32_t *c, uint32_t *h, uint32_t *w)
+{
+    uint64_t count;
+    uint64_t hw;
+    uint64_t chw;
+
+    if (!k230_gnne_shape_count(shape, &count) || !count || index >= count ||
+        umul64_overflow(shape->h, shape->w, &hw) || !hw ||
+        umul64_overflow(shape->c, hw, &chw) || !chw) {
+        return false;
+    }
+
+    *n = index / chw;
+    index %= chw;
+    *c = index / hw;
+    index %= hw;
+    *h = index / shape->w;
+    *w = index % shape->w;
+    return true;
+}
+
+static bool k230_gnne_mfu_act1_index(K230GnneFrontend *fe,
+                                     bool stride_valid, uint32_t rshape,
+                                     uint32_t rstride, uint64_t index,
+                                     uint64_t *mapped)
+{
+    K230GnneShape *shape;
+    K230GnneStride stride;
+    uint32_t n;
+    uint32_t c;
+    uint32_t h;
+    uint32_t w;
+
+    *mapped = index;
+    if (!stride_valid || rshape >= K230_GNNE_SHAPE_COUNT ||
+        !fe->shape[rshape].valid ||
+        !k230_gnne_stride_value(fe, rstride, &stride)) {
+        return true;
+    }
+
+    shape = &fe->shape[rshape];
+    if (!k230_gnne_linear_coords4(shape, index, &n, &c, &h, &w)) {
+        return true;
+    }
+
+    return k230_gnne_packed_offset4(&stride, n, c, h, w, mapped);
+}
+
 static bool k230_gnne_mfu_act1_count(K230GnneFrontend *fe, uint64_t *count)
 {
     K230GnneMfuAct1Conf *conf = &fe->mfu_act1;
@@ -2328,11 +2382,35 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
     for (uint64_t index = 0; index < count; index++) {
         double value;
         double value2;
+        uint64_t src_index = index;
+        uint64_t src2_index = index;
+        uint64_t dst_index = index;
         uint32_t channel = k230_gnne_mfu_channel(fe, index);
         unsigned int element_size;
 
+        if (conf->src2[0].valid &&
+            !k230_gnne_mfu_act1_index(fe, conf->stride_valid,
+                                      conf->src2[0].rshape,
+                                      conf->rstride_s1, index,
+                                      &src_index)) {
+            return;
+        }
+        if (binary_source && conf->src2[1].valid &&
+            !k230_gnne_mfu_act1_index(fe, conf->stride_valid,
+                                      conf->src2[1].rshape,
+                                      conf->rstride_s2, index,
+                                      &src2_index)) {
+            return;
+        }
+        if (!k230_gnne_mfu_act1_index(fe, conf->stride_valid,
+                                      conf->dest_rshape, conf->rstride_d1,
+                                      index, &dst_index)) {
+            return;
+        }
+
         if (!k230_gnne_mfu_dequant_source(fe, src_base, src_logical,
-                                          conf->src2[0].source_type, index,
+                                          conf->src2[0].source_type,
+                                          src_index,
                                           deq->quant_type, scale, bias,
                                           deq_shift, &value)) {
             return;
@@ -2340,7 +2418,7 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
         if (binary_source) {
             if (!k230_gnne_mfu_dequant_source(fe, src2_base, src2_logical,
                                               conf->src2[1].source_type,
-                                              index, deq2->quant_type,
+                                              src2_index, deq2->quant_type,
                                               scale2, bias2, deq2_shift,
                                               &value2)) {
                 return;
@@ -2356,7 +2434,7 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
                                                quant_shift, &value) :
              !k230_gnne_mfu_act1_value(arg_base, channel, value, quant_shift,
                                        &value)) ||
-            !k230_gnne_mfu_write_quant(dst_base, index, conf->quant_type,
+            !k230_gnne_mfu_write_quant(dst_base, dst_index, conf->quant_type,
                                        value, &element_size)) {
             return;
         }
