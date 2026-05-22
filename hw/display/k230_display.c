@@ -14,6 +14,7 @@
 #include "hw/display/framebuffer.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
+#include "trace.h"
 #include "ui/pixel_ops.h"
 
 #define K230_VBLANK_NS 16666667
@@ -57,6 +58,12 @@
 #define K230_VO_OSD_FMT_ARGB8888  0x53
 #define K230_VO_OSD_FMT_ARGB4444  0x54
 #define K230_VO_OSD_FMT_ARGB1555  0x55
+
+#define K230_DSI_CMD_STATUS       0x0b0
+#define K230_DSI_PHY_STATUS       0x0b8
+
+#define K230_DSI_CMD_STATUS_READY 0x1fbd
+#define K230_DSI_PHY_STATUS_READY 0x0580
 
 typedef struct K230VoPlaneConfig {
     uint32_t base;
@@ -384,6 +391,7 @@ static void k230_vo_vblank_tick(void *opaque)
     }
 
     if (s->irq) {
+        trace_k230_vo_irq(true);
         qemu_irq_pulse(s->irq);
     }
 
@@ -394,8 +402,12 @@ static void k230_vo_vblank_tick(void *opaque)
 static uint64_t k230_vo_read(void *opaque, hwaddr addr, unsigned int size)
 {
     K230VoState *s = K230_VO(opaque);
+    uint64_t val;
 
-    return k230_display_read_bytes(s->regs, sizeof(s->regs), addr, size);
+    val = k230_display_read_bytes(s->regs, sizeof(s->regs), addr, size);
+    trace_k230_vo_read(addr, val, size);
+
+    return val;
 }
 
 static void k230_vo_write(void *opaque, hwaddr addr, uint64_t val,
@@ -404,6 +416,7 @@ static void k230_vo_write(void *opaque, hwaddr addr, uint64_t val,
     K230VoState *s = K230_VO(opaque);
 
     k230_display_write_bytes(s->regs, sizeof(s->regs), addr, val, size);
+    trace_k230_vo_write(addr, val, size);
     s->invalidate = true;
 }
 
@@ -540,8 +553,22 @@ static const TypeInfo k230_vo_type_info = {
 static uint64_t k230_dsi_read(void *opaque, hwaddr addr, unsigned int size)
 {
     K230DsiState *s = K230_DSI(opaque);
+    uint64_t val;
 
-    return k230_display_read_bytes(s->regs, sizeof(s->regs), addr, size);
+    switch (addr) {
+    case K230_DSI_CMD_STATUS:
+        val = K230_DSI_CMD_STATUS_READY;
+        break;
+    case K230_DSI_PHY_STATUS:
+        val = K230_DSI_PHY_STATUS_READY;
+        break;
+    default:
+        val = k230_display_read_bytes(s->regs, sizeof(s->regs), addr, size);
+        break;
+    }
+    trace_k230_dsi_read(addr, val, size);
+
+    return val;
 }
 
 static void k230_dsi_write(void *opaque, hwaddr addr, uint64_t val,
@@ -550,6 +577,7 @@ static void k230_dsi_write(void *opaque, hwaddr addr, uint64_t val,
     K230DsiState *s = K230_DSI(opaque);
 
     k230_display_write_bytes(s->regs, sizeof(s->regs), addr, val, size);
+    trace_k230_dsi_write(addr, val, size);
 }
 
 static const MemoryRegionOps k230_dsi_ops = {
