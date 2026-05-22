@@ -2006,6 +2006,7 @@ static void test_mfu_pdp1_average_u8(void)
         GNNE_LUI(12, 0x4),
         GNNE_ADDI(12, 12, -0x400),
         GNNE_ADDI(13, 0, 0),
+        GNNE_ADDI(14, 0, 2),
         GNNE_MMU_CONF(0, 2, 0),
         GNNE_SS_PACK_SHAPE(8, 9, 9, 9, 0),
         GNNE_SS_PACK_STRIDE(10, 9, 11, 1),
@@ -2013,7 +2014,7 @@ static void test_mfu_pdp1_average_u8(void)
         GNNE_MFU_PDP1_CONF1(1, 1, 1, 2, 2),
         GNNE_MFU_PDP1_CONF2(0, 0, 0, 0),
         GNNE_MFU_PDP1_CONF3(0, 0, 0, 0),
-        GNNE_MFU_PDP1_CONF4(2, 2, 12, 0, 0),
+        GNNE_MFU_PDP1_CONF4(14, 14, 12, 0, 0),
         GNNE_MFU_PDP1_CONF_DEQ(12, 13, 1, 13),
         GNNE_MFU_PDP1_CONF_QUANT(12, 13, 1, 13),
         GNNE_MFU_PDP1_COMPUTE(4, 3, 0),
@@ -2061,6 +2062,7 @@ static void test_mfu_pdp1_min_fp16_sum_i16(void)
         GNNE_LUI(12, 0x4),
         GNNE_ADDI(12, 12, -0x400),
         GNNE_ADDI(13, 0, 0),
+        GNNE_ADDI(14, 0, 2),
         GNNE_MMU_CONF(0, 2, 0),
         GNNE_SS_PACK_SHAPE(8, 9, 9, 9, 0),
         GNNE_SS_PACK_STRIDE(10, 9, 11, 1),
@@ -2068,7 +2070,7 @@ static void test_mfu_pdp1_min_fp16_sum_i16(void)
         GNNE_MFU_PDP1_CONF1(1, 1, 1, 1, 2),
         GNNE_MFU_PDP1_CONF2(0, 0, 0, 0),
         GNNE_MFU_PDP1_CONF3(0, 0, 0, 0),
-        GNNE_MFU_PDP1_CONF4(2, 2, 12, 0, 0),
+        GNNE_MFU_PDP1_CONF4(14, 14, 12, 0, 0),
         GNNE_MFU_PDP1_CONF_DEQ(12, 13, 1, 13),
         GNNE_MFU_PDP1_CONF_QUANT(12, 13, 0, 13),
         GNNE_MFU_PDP1_COMPUTE(4, 3, 0),
@@ -2086,6 +2088,7 @@ static void test_mfu_pdp1_min_fp16_sum_i16(void)
         GNNE_LUI(12, 0x4),
         GNNE_ADDI(12, 12, -0x400),
         GNNE_ADDI(13, 0, 0),
+        GNNE_ADDI(14, 0, 2),
         GNNE_MMU_CONF(0, 2, 0),
         GNNE_SS_PACK_SHAPE(8, 9, 9, 9, 0),
         GNNE_SS_PACK_STRIDE(10, 9, 11, 1),
@@ -2093,7 +2096,7 @@ static void test_mfu_pdp1_min_fp16_sum_i16(void)
         GNNE_MFU_PDP1_CONF1(1, 1, 1, 3, 2),
         GNNE_MFU_PDP1_CONF2(0, 0, 0, 0),
         GNNE_MFU_PDP1_CONF3(0, 0, 0, 0),
-        GNNE_MFU_PDP1_CONF4(2, 2, 12, 0, 0),
+        GNNE_MFU_PDP1_CONF4(14, 14, 12, 0, 0),
         GNNE_MFU_PDP1_CONF_DEQ(12, 13, 1, 13),
         GNNE_MFU_PDP1_CONF_QUANT(12, 13, 3, 13),
         GNNE_MFU_PDP1_COMPUTE(4, 3, 0),
@@ -2127,6 +2130,61 @@ static void test_mfu_pdp1_min_fp16_sum_i16(void)
     for (size_t i = 0; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==, expected_sum[i]);
     }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_mfu_pdp1_sliding_min_u8(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        1, 2, 3,
+        4, 5, 6,
+        7, 8, 9,
+    };
+    const uint8_t expected[] = {
+        1, 2,
+        4, 5,
+        0xa5, 0xa5, 0xa5, 0xa5,
+    };
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x100),
+        GNNE_LUI(3, 1),
+        GNNE_ADDI(3, 3, 0x800),
+        GNNE_LUI(4, 1),
+        GNNE_ADDI(4, 4, 0x840),
+        GNNE_ADDI(8, 0, 1),
+        GNNE_ADDI(9, 0, 3),
+        GNNE_ADDI(10, 0, 3),
+        GNNE_ADDI(11, 0, 2),
+        GNNE_LUI(12, 0x4),
+        GNNE_ADDI(12, 12, -0x400),
+        GNNE_ADDI(13, 0, 0),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_SS_PACK_SHAPE(8, 8, 9, 9, 0),
+        GNNE_SS_PACK_STRIDE(8, 8, 10, 1),
+        GNNE_SS_PACK_STRIDE(8, 8, 11, 2),
+        GNNE_MFU_PDP1_CONF1(1, 1, 1, 1, 2),
+        GNNE_MFU_PDP1_CONF2(11, 11, 0, 0),
+        GNNE_MFU_PDP1_CONF3(0, 0, 0, 0),
+        GNNE_MFU_PDP1_CONF4(11, 11, 12, 0, 0),
+        GNNE_MFU_PDP1_CONF_DEQ(12, 13, 1, 13),
+        GNNE_MFU_PDP1_CONF_QUANT(12, 13, 1, 13),
+        GNNE_MFU_PDP1_COMPUTE(4, 3, 0),
+    };
+    uint8_t data[sizeof(expected)];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_PDP1_INPUT, source,
+                   sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_PDP1_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_PDP1_OUTPUT, data, sizeof(data));
+
+    g_assert_cmpmem(data, sizeof(data), expected, sizeof(expected));
 
     k230_kpu_assert_done_irq(qts);
     k230_kpu_clear_done_irq(qts);
@@ -3670,6 +3728,8 @@ int main(int argc, char *argv[])
                    test_mfu_pdp1_average_u8);
     qtest_add_func("/k230-kpu/mfu-pdp1-min-fp16-sum-i16",
                    test_mfu_pdp1_min_fp16_sum_i16);
+    qtest_add_func("/k230-kpu/mfu-pdp1-sliding-min-u8",
+                   test_mfu_pdp1_sliding_min_u8);
     qtest_add_func("/k230-kpu/pu-compute-conv2d-act0-u8",
                    test_pu_compute_conv2d_act0_u8);
     qtest_add_func("/k230-kpu/pu-compute-conv2d-i8-input-act0-u8",

@@ -1949,6 +1949,31 @@ static bool k230_gnne_mfu_dequant(uint64_t src, uint64_t index,
     }
 }
 
+static bool k230_gnne_mfu_dequant_literal(uint32_t raw, uint32_t quant_type,
+                                          double scale, uint32_t bias,
+                                          uint32_t shift, double *value)
+{
+    switch (quant_type) {
+    case 0:
+        *value = k230_gnne_fp16_to_double(raw);
+        return true;
+    case 1:
+        *value = ((double)(uint8_t)raw - bias) * scale *
+                 k230_gnne_pow2(-(int64_t)shift);
+        return true;
+    case 2:
+        *value = (double)(int8_t)raw * scale *
+                 k230_gnne_pow2(-(int64_t)shift);
+        return true;
+    case 3:
+        *value = (double)(int16_t)(raw & 0xffff) * scale *
+                 k230_gnne_pow2(-(int64_t)shift);
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool k230_gnne_mfu_act1_value(uint64_t arg, uint32_t channel,
                                      double value, uint32_t shift,
                                      double *result)
@@ -2599,6 +2624,10 @@ static void k230_gnne_mfu_pdp1(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t samples;
     uint64_t written = 0;
     uint64_t head = 0;
+    uint32_t output_h;
+    uint32_t output_w;
+    uint32_t pad_h;
+    uint32_t pad_w;
     double scale;
     bool valid;
 
@@ -2625,9 +2654,18 @@ static void k230_gnne_mfu_pdp1(K230KpuState *s, K230GnneFrontend *fe,
                MIN(conf->rwindow_h, input_shape->h) : input_shape->h;
     window_w = conf->conf4_valid && conf->rwindow_w ?
                MIN(conf->rwindow_w, input_shape->w) : input_shape->w;
+    output_h = conf->conf2_valid && conf->rcount_h ? conf->rcount_h : 1;
+    output_w = conf->conf2_valid && conf->rcount_w ? conf->rcount_w : 1;
+    output_h = MIN(output_h, input_shape->h);
+    output_w = MIN(output_w, input_shape->w);
+    pad_h = output_h == input_shape->h ? window_h / 2 : 0;
+    pad_w = output_w == input_shape->w ? window_w / 2 : 0;
     if (!window_h || !window_w ||
         umul64_overflow((uint64_t)window_h, window_w, &samples) ||
-        !samples) {
+        !samples ||
+        umul64_overflow(output_count, output_h, &output_count) ||
+        umul64_overflow(output_count, output_w, &output_count) ||
+        output_count > K230_GNNE_MAX_OUTPUT_SIZE / write_size) {
         return;
     }
 
@@ -2658,54 +2696,78 @@ static void k230_gnne_mfu_pdp1(K230KpuState *s, K230GnneFrontend *fe,
 
     for (uint32_t n = 0; n < input_shape->n; n++) {
         for (uint32_t c = 0; c < input_shape->c; c++) {
-            unsigned int element_size;
-            uint64_t output_index;
-            double result = 0.0;
-            bool have_sample = false;
+            for (uint32_t oh = 0; oh < output_h; oh++) {
+                for (uint32_t ow = 0; ow < output_w; ow++) {
+                    unsigned int element_size;
+                    uint64_t output_index;
+                    double result = 0.0;
+                    bool have_sample = false;
 
-            for (uint32_t h = 0; h < window_h; h++) {
-                for (uint32_t w = 0; w < window_w; w++) {
-                    uint64_t input_index;
-                    double value;
+                    for (uint32_t kh = 0; kh < window_h; kh++) {
+                        for (uint32_t kw = 0; kw < window_w; kw++) {
+                            int64_t ih = (int64_t)oh * conf->stride_h + kh -
+                                         pad_h;
+                            int64_t iw = (int64_t)ow * conf->stride_w + kw -
+                                         pad_w;
+                            double value;
 
-                    if (!k230_gnne_mfu_pdp1_source_offset(&input_stride,
-                                                          n, c, h, w,
-                                                          &input_index) ||
-                        !k230_gnne_mfu_dequant(src_base, input_index,
-                                               deq->quant_type, scale, bias,
-                                               deq_shift, &value)) {
+                            if (ih < 0 || iw < 0 ||
+                                ih >= input_shape->h || iw >= input_shape->w) {
+                                if (!k230_gnne_mfu_dequant_literal(
+                                        conf->rpad_value, deq->quant_type,
+                                        scale, bias, deq_shift, &value)) {
+                                    return;
+                                }
+                            } else {
+                                uint64_t input_index;
+
+                                if (!k230_gnne_mfu_pdp1_source_offset(
+                                        &input_stride, n, c, ih, iw,
+                                        &input_index) ||
+                                    !k230_gnne_mfu_dequant(
+                                        src_base, input_index, deq->quant_type,
+                                        scale, bias, deq_shift, &value)) {
+                                    return;
+                                }
+                            }
+                            if (!have_sample) {
+                                result = value;
+                                have_sample = true;
+                            } else if (conf->funct2 == 0 && value > result) {
+                                result = value;
+                            } else if (conf->funct2 == 1 && value < result) {
+                                result = value;
+                            } else if (conf->funct2 >= 2) {
+                                result += value;
+                            }
+                        }
+                    }
+
+                    if (!have_sample) {
                         return;
                     }
-                    if (!have_sample) {
-                        result = value;
-                        have_sample = true;
-                    } else if (conf->funct2 == 0 && value > result) {
-                        result = value;
-                    } else if (conf->funct2 == 1 && value < result) {
-                        result = value;
-                    } else if (conf->funct2 >= 2) {
-                        result += value;
+                    if (output_h == 1 && output_w == 1) {
+                        if (!k230_gnne_offset4(&output_stride, n, c, 0, 0,
+                                               &output_index)) {
+                            return;
+                        }
+                    } else if (!k230_gnne_packed_offset4(&output_stride, n, c,
+                                                         oh, ow,
+                                                         &output_index)) {
+                        return;
                     }
+                    if (conf->funct2 == 2) {
+                        result /= samples;
+                    }
+                    if (!k230_gnne_mfu_pdp1_quant(fe, conf, &result) ||
+                        !k230_gnne_mfu_write_quant(dst_base, output_index,
+                                                   conf->quant_type, result,
+                                                   &element_size)) {
+                        return;
+                    }
+                    written += element_size;
                 }
             }
-
-            if (!have_sample) {
-                return;
-            }
-            if (!k230_gnne_offset4(&output_stride, n, c, 0, 0,
-                                   &output_index)) {
-                return;
-            }
-            if (conf->funct2 == 2) {
-                result /= samples;
-            }
-            if (!k230_gnne_mfu_pdp1_quant(fe, conf, &result) ||
-                !k230_gnne_mfu_write_quant(dst_base, output_index,
-                                           conf->quant_type, result,
-                                           &element_size)) {
-                return;
-            }
-            written += element_size;
         }
     }
 
@@ -3771,26 +3833,43 @@ static void k230_gnne_mfu_conf(K230GnneFrontend *fe, uint32_t word)
         pdp1->conf1_valid = true;
         break;
     case 0x02:
-        pdp1->rcount_w = extract32(word, 12, 5);
-        pdp1->rcount_h = extract32(word, 17, 5);
-        pdp1->rpe_h = extract32(word, 22, 5);
-        pdp1->rpe_last_h = extract32(word, 27, 5);
-        pdp1->conf2_valid = true;
+        pdp1->rcount_w = k230_gnne_gp(fe, extract32(word, 12, 5),
+                                      &valid);
+        pdp1->conf2_valid = valid;
+        pdp1->rcount_h = k230_gnne_gp(fe, extract32(word, 17, 5),
+                                      &valid);
+        pdp1->conf2_valid &= valid;
+        pdp1->rpe_h = k230_gnne_gp(fe, extract32(word, 22, 5),
+                                   &valid);
+        pdp1->conf2_valid &= valid;
+        pdp1->rpe_last_h = k230_gnne_gp(fe, extract32(word, 27, 5),
+                                        &valid);
+        pdp1->conf2_valid &= valid;
         break;
     case 0x03:
-        pdp1->rpe_channels = extract32(word, 12, 5);
-        pdp1->rpe_last_channels = extract32(word, 17, 5);
-        pdp1->rpad_value = extract32(word, 22, 5);
+        pdp1->rpe_channels = k230_gnne_gp(fe, extract32(word, 12, 5),
+                                          &valid);
+        pdp1->conf3_valid = valid;
+        pdp1->rpe_last_channels = k230_gnne_gp(fe, extract32(word, 17, 5),
+                                               &valid);
+        pdp1->conf3_valid &= valid;
+        pdp1->rpad_value = k230_gnne_gp(fe, extract32(word, 22, 5),
+                                        &valid);
+        pdp1->conf3_valid &= valid;
         pdp1->sspad = extract32(word, 27, 3);
-        pdp1->conf3_valid = true;
         break;
     case 0x04:
-        pdp1->rwindow_w = extract32(word, 12, 5);
-        pdp1->rwindow_h = extract32(word, 17, 5);
-        pdp1->rscale = extract32(word, 22, 5);
+        pdp1->rwindow_w = k230_gnne_gp(fe, extract32(word, 12, 5),
+                                       &valid);
+        pdp1->conf4_valid = valid;
+        pdp1->rwindow_h = k230_gnne_gp(fe, extract32(word, 17, 5),
+                                       &valid);
+        pdp1->conf4_valid &= valid;
+        pdp1->rscale = k230_gnne_gp(fe, extract32(word, 22, 5),
+                                    &valid);
+        pdp1->conf4_valid &= valid;
         pdp1->enable_h2c = extract32(word, 27, 1);
         pdp1->enable_bw = extract32(word, 28, 1);
-        pdp1->conf4_valid = true;
         break;
     case 0x06:
         pdp1->deq.rscale = extract32(word, 12, 5);
