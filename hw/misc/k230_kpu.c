@@ -1120,6 +1120,14 @@ static bool k230_gnne_dma_write_bytes(uint64_t addr, const void *buf,
                             MEMTXATTRS_UNSPECIFIED) == MEMTX_OK;
 }
 
+static uint64_t k230_gnne_head_le_p(const void *buf, uint64_t size)
+{
+    uint8_t head[8] = {};
+
+    memcpy(head, buf, MIN(size, (uint64_t)sizeof(head)));
+    return ldq_le_p(head);
+}
+
 static bool k230_gnne_read_fp16(uint64_t addr, double *value)
 {
     uint8_t buf[2];
@@ -1288,6 +1296,8 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t dst_logical;
     uint64_t total_count;
     uint64_t copied = 0;
+    uint64_t head = 0;
+    bool head_valid = false;
     bool valid;
 
     src_addr = k230_gnne_gp(fe, raddr_s, &valid);
@@ -1341,6 +1351,10 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
                                            line, shape->w * src_size)) {
                     return;
                 }
+                if (!head_valid && shape->w * src_size) {
+                    head = k230_gnne_head_le_p(line, shape->w * src_size);
+                    head_valid = true;
+                }
 
                 for (uint32_t w = 0; w < shape->w; w++) {
                     uint64_t dst_off = dst_base + dst_line +
@@ -1359,7 +1373,8 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
         }
     }
 
-    trace_k230_kpu_l2_load(k230_kpu_name(s), src_addr, dst_logical, copied);
+    trace_k230_kpu_l2_load(k230_kpu_name(s), src_addr, dst_logical, copied,
+                           head);
     fe->l2_loads++;
     fe->input_bytes += copied;
 }
@@ -1380,6 +1395,8 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t dst_base;
     uint64_t dst_logical = 0;
     uint64_t copied = 0;
+    uint8_t head_buf[8] = {};
+    uint64_t head_size = 0;
     bool valid;
 
     if (conf->enable_decompress ||
@@ -1444,6 +1461,14 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
                                           rlen, valid_c);
             return;
         }
+        if (head_size < sizeof(head_buf)) {
+            unsigned int chunk = MIN(src_size,
+                                     (unsigned int)(sizeof(head_buf) -
+                                                    head_size));
+
+            memcpy(head_buf + head_size, item, chunk);
+            head_size += chunk;
+        }
         k230_gnne_l2_load_item(item, item, conf, src_size, dst_size);
         if (!k230_gnne_dma_write_bytes(dst_base + dst_off, item,
                                        dst_size)) {
@@ -1457,7 +1482,8 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
     }
 
     trace_k230_kpu_l2_load_w(k230_kpu_name(s), src_addr, dst_logical,
-                             rlen, valid_c);
+                             rlen, valid_c,
+                             k230_gnne_head_le_p(head_buf, head_size));
     fe->l2_load_ws++;
     fe->input_bytes += copied;
 }
