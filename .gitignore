@@ -10,6 +10,7 @@
 .clang-format
 .gdb_history
 .plan
+.humanize
 cscope.*
 tags
 TAGS
