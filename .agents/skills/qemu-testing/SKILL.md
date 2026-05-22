@@ -50,8 +50,12 @@ For local K230 device-model work, prefer the focused qtests before broader
 test suites:
 
 ```bash
-ninja -C build qemu-system-riscv64 tests/qtest/k230-sysctl-test
+ninja -C build qemu-system-riscv64 \
+  tests/qtest/k230-kpu-test \
+  tests/qtest/k230-sysctl-test \
+  tests/qtest/k230-wdt-test
 ./build/pyvenv/bin/meson test \
+  qtest-riscv64/k230-kpu-test \
   qtest-riscv64/k230-sysctl-test \
   qtest-riscv64/k230-wdt-test \
   -C build --print-errorlogs
