@@ -26,6 +26,7 @@ struct K230GsdmaState {
 
     /*< public >*/
     MemoryRegion mmio;
+    qemu_irq irq;
     uint8_t regs[K230_GSDMA_SIZE];
 };
 

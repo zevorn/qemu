@@ -10,6 +10,7 @@
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "migration/vmstate.h"
+#include "hw/core/irq.h"
 #include "hw/dma/k230_gsdma.h"
 
 #define K230_GSDMA_INT_STAT      0x08
@@ -18,7 +19,7 @@
 #define K230_GSDMA_CH_CTL        0x00
 #define K230_GSDMA_CH_STATUS     0x04
 #define K230_GSDMA_CH_LLT_SADDR  0x10
-#define K230_GSDMA_CH_COUNT      8
+#define K230_GSDMA_CH_COUNT      4
 #define K230_GSDMA_CH_BUSY       BIT(0)
 #define K230_GSDMA_UGZIP_WR_DONE 0x222
 
@@ -58,6 +59,11 @@ static hwaddr k230_gsdma_ch_addr(unsigned int ch, hwaddr reg)
     return K230_GSDMA_CH_BASE + ch * K230_GSDMA_CH_STRIDE + reg;
 }
 
+static void k230_gsdma_update_irq(K230GsdmaState *s)
+{
+    qemu_set_irq(s->irq, k230_gsdma_reg_read32(s, K230_GSDMA_INT_STAT) != 0);
+}
+
 uint32_t k230_gsdma_get_llt_saddr(K230GsdmaState *s, unsigned int ch)
 {
     assert(ch < K230_GSDMA_CH_COUNT);
@@ -75,6 +81,7 @@ void k230_gsdma_ugzip_complete(K230GsdmaState *s)
     k230_gsdma_reg_write32(s, K230_GSDMA_INT_STAT,
                            k230_gsdma_reg_read32(s, K230_GSDMA_INT_STAT) |
                            K230_GSDMA_UGZIP_WR_DONE);
+    k230_gsdma_update_irq(s);
 }
 
 static uint64_t k230_gsdma_read(void *opaque, hwaddr addr, unsigned int size)
@@ -92,6 +99,7 @@ static void k230_gsdma_write(void *opaque, hwaddr addr, uint64_t val,
 
         k230_gsdma_reg_write32(s, K230_GSDMA_INT_STAT,
                                int_stat & ~(uint32_t)val);
+        k230_gsdma_update_irq(s);
         return;
     }
 
@@ -107,7 +115,12 @@ static void k230_gsdma_write(void *opaque, hwaddr addr, uint64_t val,
                 if (val & BIT(1)) {
                     k230_gsdma_reg_write32(s, status, 0);
                 } else if (val & BIT(0)) {
-                    k230_gsdma_reg_write32(s, status, K230_GSDMA_CH_BUSY);
+                    k230_gsdma_reg_write32(s, status, 0);
+                    k230_gsdma_reg_write32(s, K230_GSDMA_INT_STAT,
+                                           k230_gsdma_reg_read32(s,
+                                               K230_GSDMA_INT_STAT) |
+                                           BIT(ch));
+                    k230_gsdma_update_irq(s);
                 }
                 break;
             }
@@ -136,6 +149,7 @@ static void k230_gsdma_reset(DeviceState *dev)
     K230GsdmaState *s = K230_GSDMA(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    qemu_set_irq(s->irq, 0);
 }
 
 static const VMStateDescription vmstate_k230_gsdma = {
@@ -154,6 +168,7 @@ static void k230_gsdma_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->mmio, OBJECT(dev), &k230_gsdma_ops, s,
                           TYPE_K230_GSDMA, K230_GSDMA_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
+    sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq);
 }
 
 static void k230_gsdma_class_init(ObjectClass *oc, const void *data)
