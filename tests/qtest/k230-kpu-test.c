@@ -724,6 +724,49 @@ static void test_l2_store_copies_parsed_output(void)
     qtest_quit(qts);
 }
 
+static void test_l2_store_converts_fp16_to_fp32(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x00, 0x3c,             /* fp16 1.0 */
+        0x00, 0x40,             /* fp16 2.0 */
+    };
+    const uint8_t expected[] = {
+        0x00, 0x00, 0x80, 0x3f, /* fp32 1.0 */
+        0x00, 0x00, 0x00, 0x40, /* fp32 2.0 */
+    };
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x340),
+        GNNE_ADDI(3, 0, 0x180),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(5, 0, 2),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 1),
+        GNNE_L2_STORE_CONF(1, 0, 1, 2),
+        GNNE_L2_STORE(3, 2, 0),
+    };
+    uint8_t data[12];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_STORE_SOURCE,
+                   source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(expected) ? expected[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_l2_load_copies_to_glb(void)
 {
     QTestState *qts = k230_kpu_init();
@@ -754,6 +797,49 @@ static void test_l2_load_copies_to_glb(void)
     for (size_t i = 0; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==,
                         i < sizeof(source) ? source[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_l2_load_converts_fp32_to_fp16(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x00, 0x00, 0x80, 0x3f, /* fp32 1.0 */
+        0x00, 0x00, 0x00, 0x40, /* fp32 2.0 */
+    };
+    const uint8_t expected[] = {
+        0x00, 0x3c,             /* fp16 1.0 */
+        0x00, 0x40,             /* fp16 2.0 */
+    };
+    const uint32_t commands[] = {
+        GNNE_LUI(6, K230_GNNE_SYNTH_SOURCE >> 12),
+        GNNE_ADDI(2, 0, 0x100),
+        GNNE_ADDI(3, 0, 0x240),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(5, 0, 2),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 1),
+        GNNE_L2_LOAD_CONF(1, 0, 1, 2),
+        GNNE_L2_LOAD(3, 6, 0),
+    };
+    uint8_t data[8];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_SOURCE, source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_LOAD_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_LOAD_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(expected) ? expected[i] : 0xa5);
     }
 
     k230_kpu_assert_done_irq(qts);
@@ -3136,8 +3222,12 @@ int main(int argc, char *argv[])
                    test_clear_status_allows_second_run);
     qtest_add_func("/k230-kpu/l2-store-copies-parsed-output",
                    test_l2_store_copies_parsed_output);
+    qtest_add_func("/k230-kpu/l2-store-converts-fp16-to-fp32",
+                   test_l2_store_converts_fp16_to_fp32);
     qtest_add_func("/k230-kpu/l2-load-copies-to-glb",
                    test_l2_load_copies_to_glb);
+    qtest_add_func("/k230-kpu/l2-load-converts-fp32-to-fp16",
+                   test_l2_load_converts_fp32_to_fp16);
     qtest_add_func("/k230-kpu/l2-load-then-store-roundtrip",
                    test_l2_load_then_store_roundtrip);
     qtest_add_func("/k230-kpu/ai2d-compute-preserves-command-stream",

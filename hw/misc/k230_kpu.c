@@ -1079,6 +1079,50 @@ static bool k230_gnne_write_fp16(uint64_t addr, double value)
     return k230_gnne_dma_write_bytes(addr, buf, sizeof(buf));
 }
 
+static float k230_gnne_ldfl_le_p(const uint8_t *buf)
+{
+    uint32_t raw = ldl_le_p(buf);
+    float value;
+
+    memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
+static void k230_gnne_stfl_le_p(uint8_t *buf, double value)
+{
+    float f32 = value;
+    uint32_t raw;
+
+    memcpy(&raw, &f32, sizeof(raw));
+    stl_le_p(buf, raw);
+}
+
+static void k230_gnne_l2_load_item(uint8_t *dst, const uint8_t *src,
+                                   K230GnneL2Conf *conf,
+                                   unsigned int src_size,
+                                   unsigned int dst_size)
+{
+    if (conf->ddr_datatype == 2 && conf->l2_datatype == 1) {
+        stw_le_p(dst, k230_gnne_double_to_fp16(k230_gnne_ldfl_le_p(src)));
+        return;
+    }
+
+    memcpy(dst, src, MIN(src_size, dst_size));
+}
+
+static void k230_gnne_l2_store_item(uint8_t *dst, const uint8_t *src,
+                                    K230GnneL2Conf *conf,
+                                    unsigned int src_size,
+                                    unsigned int dst_size)
+{
+    if (conf->l2_datatype == 1 && conf->ddr_datatype == 2) {
+        k230_gnne_stfl_le_p(dst, k230_gnne_fp16_to_double(lduw_le_p(src)));
+        return;
+    }
+
+    memcpy(dst, src, MIN(src_size, dst_size));
+}
+
 static bool k230_gnne_quant_type_size(uint32_t quant_type, unsigned int *size)
 {
     switch (quant_type) {
@@ -1242,8 +1286,8 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
                                        (uint64_t)w * dst_size;
                     uint8_t item[4] = {};
 
-                    memcpy(item, line + w * src_size, MIN(src_size,
-                                                          dst_size));
+                    k230_gnne_l2_load_item(item, line + w * src_size, conf,
+                                           src_size, dst_size);
                     if (!k230_gnne_dma_write_bytes(dst_off, item,
                                                    dst_size)) {
                         return;
@@ -1339,6 +1383,7 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
                                           rlen, valid_c);
             return;
         }
+        k230_gnne_l2_load_item(item, item, conf, src_size, dst_size);
         if (!k230_gnne_dma_write_bytes(dst_base + dst_off, item,
                                        dst_size)) {
             trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
@@ -1487,10 +1532,18 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                     uint64_t dst_off = dst_base + dst_line +
                                        (uint64_t)w * dst_size;
                     uint8_t item[4] = {};
+                    uint8_t out[4] = {};
 
-                    if (!k230_gnne_dma_read_bytes(src_off, item, src_size) ||
-                        !k230_gnne_dma_write_bytes(dst_off, item,
-                                                   dst_size)) {
+                    if (!k230_gnne_dma_read_bytes(src_off, item, src_size)) {
+                        trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
+                                                     K230_GNNE_SKIP_DEST_WRITE,
+                                                     src_off, dst_off,
+                                                     rshape, copied);
+                        return;
+                    }
+                    k230_gnne_l2_store_item(out, item, conf, src_size,
+                                            dst_size);
+                    if (!k230_gnne_dma_write_bytes(dst_off, out, dst_size)) {
                         trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
                                                      K230_GNNE_SKIP_DEST_WRITE,
                                                      src_off, dst_off,
