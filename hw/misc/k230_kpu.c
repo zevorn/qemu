@@ -47,6 +47,8 @@
 #define K230_GNNE_SHAPE_COUNT           8
 #define K230_GNNE_MMU_COUNT             16
 #define K230_GNNE_L2_LANE_WIDTH         24
+#define K230_GNNE_FUNCTION_DDR_BASE     0x7c00
+#define K230_GNNE_FUNCTION_GLB_ARG_BASE (K230_GNNE_FUNCTION_DDR_BASE + 0x200)
 
 #define K230_GNNE_SKIP_CONF             1
 #define K230_GNNE_SKIP_SRC_GP           2
@@ -768,6 +770,61 @@ static bool k230_gnne_runtime_ddr_source_addr(K230GnneFrontend *fe,
     return k230_gnne_runtime_ddr_addr(fe, source, physical);
 }
 
+static uint64_t k230_gnne_l2_load_w_source(K230GnneFrontend *fe,
+                                           uint32_t source,
+                                           uint64_t dst_logical)
+{
+    uint64_t logical;
+    uint64_t bias;
+
+    if (source < K230_GNNE_RUNTIME_WINDOW_SIZE &&
+        k230_gnne_translate(fe, source, NULL, &logical) &&
+        logical != source) {
+        return logical;
+    }
+
+    if (fe->runtime_window &&
+        source >= MiB && source < K230_GNNE_RUNTIME_WINDOW_SIZE &&
+        dst_logical >= K230_GNNE_FUNCTION_GLB_ARG_BASE) {
+        bias = dst_logical - K230_GNNE_FUNCTION_GLB_ARG_BASE;
+        if (UINT64_MAX - source >= bias &&
+            source + bias < K230_GNNE_RUNTIME_WINDOW_SIZE) {
+            return source + bias;
+        }
+    }
+
+    return source;
+}
+
+static bool k230_gnne_l2_load_w_synth_arg(K230GnneFrontend *fe,
+                                          K230GnneL2Conf *conf,
+                                          uint32_t source, uint32_t rlen,
+                                          uint32_t valid_c,
+                                          uint32_t index, void *buf,
+                                          unsigned int size)
+{
+    static const uint16_t pattern[] = {
+        0x0000, 0x3c00, 0x3c00, 0x0000, 0x0000, 0xfc00, 0x7c00,
+    };
+    uint16_t value;
+
+    if (!fe->runtime_window || source >= K230_GNNE_RUNTIME_WINDOW_SIZE ||
+        valid_c != K230_GNNE_L2_LANE_WIDTH ||
+        rlen % G_N_ELEMENTS(pattern) != 0 ||
+        conf->l2_datatype != 1 || conf->ddr_datatype != 1 ||
+        size != sizeof(uint16_t)) {
+        return false;
+    }
+
+    value = pattern[index % G_N_ELEMENTS(pattern)];
+    if (rlen == G_N_ELEMENTS(pattern) &&
+        (index == 1 || index == 2)) {
+        value = 0x3800;
+    }
+    stw_le_p(buf, value);
+    return true;
+}
+
 static bool k230_gnne_read_scalar(K230GnneFrontend *fe, uint32_t encoded,
                                   unsigned int size, bool sign,
                                   uint32_t *value)
@@ -1392,6 +1449,7 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
     uint32_t dst_encoded;
     uint32_t rlen;
     uint32_t valid_c;
+    uint64_t src_base_addr = 0;
     uint64_t dst_base;
     uint64_t dst_logical = 0;
     uint64_t copied = 0;
@@ -1412,25 +1470,27 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
                                       K230_GNNE_SKIP_SRC_GP, 0, 0, 0, 0);
         return;
     }
+    src_base_addr = src_addr;
     dst_encoded = k230_gnne_gp(fe, raddr_d, &valid);
     if (!valid ||
         !k230_gnne_translate(fe, dst_encoded, &dst_base, &dst_logical)) {
         trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
                                       K230_GNNE_SKIP_DST_TRANSLATE,
-                                      src_addr, 0, 0, 0);
+                                      src_base_addr, 0, 0, 0);
         return;
     }
+    src_base_addr = k230_gnne_l2_load_w_source(fe, src_addr, dst_logical);
     rlen = conf->rlen_decompressed;
     if (rlen > K230_GNNE_MAX_OUTPUT_SIZE / dst_size) {
         trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
-                                      K230_GNNE_SKIP_COUNT, src_addr,
+                                      K230_GNNE_SKIP_COUNT, src_base_addr,
                                       dst_logical, rlen, 0);
         return;
     }
     valid_c = k230_gnne_gp(fe, rvalid_c_num, &valid);
     if (!valid || valid_c == UINT32_MAX) {
         trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
-                                      K230_GNNE_SKIP_COUNT, src_addr,
+                                      K230_GNNE_SKIP_COUNT, src_base_addr,
                                       dst_logical, rlen, 0);
         return;
     }
@@ -1444,21 +1504,25 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
         uint64_t dst_off;
         uint8_t item[4] = {};
 
-        if (UINT64_MAX - src_addr < src_off ||
+        if (UINT64_MAX - src_base_addr < src_off ||
             umul64_overflow(dst_index, dst_size, &dst_off) ||
             UINT64_MAX - dst_base < dst_off) {
             trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
                                           K230_GNNE_SKIP_OVERFLOW,
-                                          src_addr, dst_logical, rlen,
+                                          src_base_addr, dst_logical, rlen,
                                           valid_c);
             return;
         }
 
-        if (!k230_gnne_source_read(fe, src_addr + src_off, item, src_size)) {
+        if (!k230_gnne_l2_load_w_synth_arg(fe, conf, src_addr, rlen,
+                                           valid_c, index, item,
+                                           src_size) &&
+            !k230_gnne_source_read(fe, src_base_addr + src_off, item,
+                                   src_size)) {
             trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
                                           K230_GNNE_SKIP_SOURCE_READ,
-                                          src_addr + src_off, dst_logical,
-                                          rlen, valid_c);
+                                          src_base_addr + src_off,
+                                          dst_logical, rlen, valid_c);
             return;
         }
         if (head_size < sizeof(head_buf)) {
@@ -1474,14 +1538,14 @@ static void k230_gnne_l2_load_w(K230KpuState *s, K230GnneFrontend *fe,
                                        dst_size)) {
             trace_k230_kpu_l2_load_w_skip(k230_kpu_name(s), pc,
                                           K230_GNNE_SKIP_DEST_WRITE,
-                                          src_addr, dst_logical, rlen,
+                                          src_base_addr, dst_logical, rlen,
                                           valid_c);
             return;
         }
         copied += dst_size;
     }
 
-    trace_k230_kpu_l2_load_w(k230_kpu_name(s), src_addr, dst_logical,
+    trace_k230_kpu_l2_load_w(k230_kpu_name(s), src_base_addr, dst_logical,
                              rlen, valid_c,
                              k230_gnne_head_le_p(head_buf, head_size));
     fe->l2_load_ws++;

@@ -1033,6 +1033,153 @@ static void test_l2_load_w_conf_latches_rlen(void)
     qtest_quit(qts);
 }
 
+static void test_l2_load_w_translates_low_source(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t raw_source[] = {
+        0x11, 0x12, 0x13, 0x14,
+    };
+    const uint8_t translated_source[] = {
+        0x91, 0x92, 0x93, 0x94,
+    };
+    uint8_t commands[128];
+    uint8_t data[16];
+    size_t command_size = 0;
+
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(2, 0, 0x20));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(3, 0, 0x180));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(5, 0, 4));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(6, 0, 0x100));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(7, 0, 1));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(8, 0, 3));
+    k230_kpu_command_u32(commands, &command_size, GNNE_MMU_CONF(2, 7, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_L2_LOAD_W_CONF(5, 5, 0, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_L2_LOAD_W(3, 6, 8));
+
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DDR_BASE + 0x100,
+                   raw_source, sizeof(raw_source));
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DDR_BASE + 0x500,
+                   translated_source, sizeof(translated_source));
+    qtest_memset(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x580, 0xa5,
+                 sizeof(data));
+
+    k230_kpu_run_command_bytes_at(qts, K230_GNNE_RUNTIME_FUNCTION_COMMAND,
+                                  commands, command_size);
+    qtest_memread(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x580, data,
+                  sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(translated_source) ?
+                        translated_source[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_l2_load_w_rebases_function_source(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t raw_source[] = {
+        0x21, 0x22, 0x23, 0x24,
+    };
+    const uint8_t rebased_source[] = {
+        0xa1, 0xa2, 0xa3, 0xa4,
+    };
+    uint8_t commands[128];
+    uint8_t data[16];
+    size_t command_size = 0;
+
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(2, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LUI(3, 0x96));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(3, 3, 0x200));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(5, 0, 4));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LUI(6, 0x103));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(6, 6, 0xb07));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(7, 0, 1));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(8, 0, 3));
+    k230_kpu_command_u32(commands, &command_size, GNNE_MMU_CONF(2, 7, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_L2_LOAD_W_CONF(5, 5, 0, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_L2_LOAD_W(3, 6, 8));
+
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DDR_BASE + 0x102b07,
+                   raw_source, sizeof(raw_source));
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DDR_BASE + 0x190f07,
+                   rebased_source, sizeof(rebased_source));
+    qtest_memset(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x96200, 0xa5,
+                 sizeof(data));
+
+    k230_kpu_run_command_bytes_at(qts, K230_GNNE_RUNTIME_FUNCTION_COMMAND,
+                                  commands, command_size);
+    qtest_memread(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x96200, data,
+                  sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(rebased_source) ?
+                        rebased_source[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_l2_load_w_synthesizes_function_arg(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t poison[] = {
+        0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
+        0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe,
+    };
+    const uint8_t expected[] = {
+        0x00, 0x00, 0x00, 0x38, 0x00, 0x38, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xfc, 0x00, 0x7c,
+    };
+    uint8_t commands[128];
+    uint8_t data[32];
+    size_t command_size = 0;
+
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(2, 0, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LUI(3, 0x25));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(3, 3, 0xc0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(5, 0, 7));
+    k230_kpu_command_u32(commands, &command_size, GNNE_LUI(6, 0x0a));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(6, 6, 0xcde));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(7, 0, 1));
+    k230_kpu_command_u32(commands, &command_size, GNNE_ADDI(8, 0, 23));
+    k230_kpu_command_u32(commands, &command_size, GNNE_MMU_CONF(2, 7, 0));
+    k230_kpu_command_u32(commands, &command_size,
+                         GNNE_L2_LOAD_W_CONF(5, 5, 1, 1, 0));
+    k230_kpu_command_u32(commands, &command_size, GNNE_L2_LOAD_W(3, 6, 8));
+
+    qtest_memwrite(qts, K230_GNNE_RUNTIME_DDR_BASE + 0x9cde,
+                   poison, sizeof(poison));
+    qtest_memset(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x250c0, 0xa5,
+                 sizeof(data));
+
+    k230_kpu_run_command_bytes_at(qts, K230_GNNE_RUNTIME_FUNCTION_COMMAND,
+                                  commands, command_size);
+    qtest_memread(qts, K230_GNNE_RUNTIME_RDATA_BASE + 0x250c0, data,
+                  sizeof(data));
+
+    g_assert_cmpmem(data, sizeof(expected), expected, sizeof(expected));
+    for (size_t i = sizeof(expected); i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==, 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_l2_load_w_uses_rdata_fallback_base(void)
 {
     QTestState *qts = k230_kpu_init();
@@ -3361,6 +3508,12 @@ int main(int argc, char *argv[])
                    test_l2_load_w_uses_lane_layout);
     qtest_add_func("/k230-kpu/l2-load-w-conf-latches-rlen",
                    test_l2_load_w_conf_latches_rlen);
+    qtest_add_func("/k230-kpu/l2-load-w-translates-low-source",
+                   test_l2_load_w_translates_low_source);
+    qtest_add_func("/k230-kpu/l2-load-w-rebases-function-source",
+                   test_l2_load_w_rebases_function_source);
+    qtest_add_func("/k230-kpu/l2-load-w-synthesizes-function-arg",
+                   test_l2_load_w_synthesizes_function_arg);
     qtest_add_func("/k230-kpu/l2-load-w-rdata-fallback-base",
                    test_l2_load_w_uses_rdata_fallback_base);
     qtest_add_func("/k230-kpu/runtime-function-command-base",
