@@ -10,6 +10,7 @@
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "migration/vmstate.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/k230_sysctl.h"
 
 #define K230_SYSCTL_PLL_COUNT 4
@@ -28,10 +29,28 @@
 #define K230_SYSCTL_AI_REPAIR   BIT(4)
 #define K230_SYSCTL_REPAIR_WEN  BIT(20)
 
+/*
+ * SDK U-Boot programs cpu1_hart_rstvec in the BOOT block, then releases
+ * CPU1 through CPU1_RST_CTL using per-bit write-enable bits.
+ */
+#define K230_SYSCTL_CPU1_RST_CTL      0x0c
+#define K230_SYSCTL_CPU1_RSTVEC       0x104
+#define K230_SYSCTL_CPU1_RST_REQ      BIT(0)
+#define K230_SYSCTL_CPU1_RST_DONE     BIT(12)
+#define K230_SYSCTL_CPU1_PRST_DONE    BIT(13)
+#define K230_SYSCTL_CPU1_RST_REQ_WEN  BIT(16)
+#define K230_SYSCTL_CPU1_RST_DONE_WEN BIT(28)
+#define K230_SYSCTL_CPU1_PRST_DONE_WEN BIT(29)
+#define K230_SYSCTL_CPU1_RST_CTL_RESET 0x00002001
+
 typedef struct K230SysctlPowerDomain {
     hwaddr en;
     hwaddr stat;
 } K230SysctlPowerDomain;
+
+typedef struct K230SysctlCpu1Reset {
+    uint64_t rstvec;
+} K230SysctlCpu1Reset;
 
 static const K230SysctlPowerDomain k230_power_domains[] = {
     { 0x018, 0x01c }, /* CPU1 */
@@ -289,10 +308,158 @@ static const TypeInfo k230_sysctl_power_type_info = {
     .class_init = k230_sysctl_power_class_init,
 };
 
+static uint64_t k230_sysctl_reset_read(void *opaque, hwaddr addr,
+                                       unsigned int size)
+{
+    return k230_sysctl_read_bytes(K230_SYSCTL_RESET(opaque)->regs, addr, size);
+}
+
+static void k230_sysctl_reset_cpu1_async_work(CPUState *cpu,
+                                              run_on_cpu_data data)
+{
+    K230SysctlCpu1Reset *reset = data.host_ptr;
+
+    cpu_reset(cpu);
+    cpu_set_pc(cpu, reset->rstvec);
+    cpu->halted = 0;
+    g_free(reset);
+}
+
+static void k230_sysctl_reset_release_cpu1(K230SysctlResetState *s)
+{
+    K230SysctlCpu1Reset *reset;
+    uint64_t rstvec;
+
+    if (!s->cpu1 || !s->boot) {
+        return;
+    }
+
+    rstvec = k230_sysctl_reg_read32(s->boot->regs, K230_SYSCTL_CPU1_RSTVEC);
+
+    reset = g_new(K230SysctlCpu1Reset, 1);
+    reset->rstvec = rstvec;
+    async_safe_run_on_cpu(s->cpu1, k230_sysctl_reset_cpu1_async_work,
+                          RUN_ON_CPU_HOST_PTR(reset));
+}
+
+static void k230_sysctl_reset_write_cpu1(K230SysctlResetState *s,
+                                         uint32_t val)
+{
+    uint32_t old = k230_sysctl_reg_read32(s->regs,
+                                          K230_SYSCTL_CPU1_RST_CTL);
+    uint32_t new = old;
+
+    if ((val & K230_SYSCTL_CPU1_RST_DONE_WEN) &&
+        (val & K230_SYSCTL_CPU1_RST_DONE)) {
+        new &= ~K230_SYSCTL_CPU1_RST_DONE;
+    }
+    if ((val & K230_SYSCTL_CPU1_PRST_DONE_WEN) &&
+        (val & K230_SYSCTL_CPU1_PRST_DONE)) {
+        new &= ~K230_SYSCTL_CPU1_PRST_DONE;
+    }
+
+    if (val & K230_SYSCTL_CPU1_RST_REQ_WEN) {
+        if (val & K230_SYSCTL_CPU1_RST_REQ) {
+            new |= K230_SYSCTL_CPU1_RST_REQ;
+        } else {
+            new &= ~K230_SYSCTL_CPU1_RST_REQ;
+        }
+    }
+
+    if ((old & K230_SYSCTL_CPU1_RST_REQ) &&
+        !(new & K230_SYSCTL_CPU1_RST_REQ)) {
+        k230_sysctl_reset_release_cpu1(s);
+        new |= K230_SYSCTL_CPU1_RST_DONE;
+    }
+
+    k230_sysctl_reg_write32(s->regs, K230_SYSCTL_CPU1_RST_CTL, new);
+}
+
+static void k230_sysctl_reset_write(void *opaque, hwaddr addr, uint64_t val,
+                                    unsigned int size)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(opaque);
+
+    if (size == 4 && addr == K230_SYSCTL_CPU1_RST_CTL) {
+        k230_sysctl_reset_write_cpu1(s, val);
+    } else {
+        k230_sysctl_write_bytes(s->regs, addr, val, size);
+    }
+}
+
+static const MemoryRegionOps k230_sysctl_reset_ops = {
+    .read = k230_sysctl_reset_read,
+    .write = k230_sysctl_reset_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+        .unaligned = true,
+    },
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+        .unaligned = true,
+    },
+};
+
+static void k230_sysctl_reset_reset(DeviceState *dev)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(dev);
+
+    memset(s->regs, 0, sizeof(s->regs));
+    k230_sysctl_reg_write32(s->regs, K230_SYSCTL_CPU1_RST_CTL,
+                            K230_SYSCTL_CPU1_RST_CTL_RESET);
+}
+
+static const VMStateDescription vmstate_k230_sysctl_reset = {
+    .name = TYPE_K230_SYSCTL_RESET,
+    .version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(regs, K230SysctlResetState, K230_SYSCTL_SIZE),
+        VMSTATE_END_OF_LIST(),
+    },
+};
+
+static const Property k230_sysctl_reset_properties[] = {
+    DEFINE_PROP_LINK("boot", K230SysctlResetState, boot,
+                     TYPE_K230_SYSCTL_BOOT, K230SysctlBootState *),
+    DEFINE_PROP_LINK("cpu1", K230SysctlResetState, cpu1, TYPE_CPU,
+                     CPUState *),
+};
+
+static void k230_sysctl_reset_realize(DeviceState *dev, Error **errp)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(dev);
+
+    memory_region_init_io(&s->mmio, OBJECT(dev), &k230_sysctl_reset_ops, s,
+                          TYPE_K230_SYSCTL_RESET, K230_SYSCTL_SIZE);
+    sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
+}
+
+static void k230_sysctl_reset_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->realize = k230_sysctl_reset_realize;
+    device_class_set_props(dc, k230_sysctl_reset_properties);
+    device_class_set_legacy_reset(dc, k230_sysctl_reset_reset);
+    dc->vmsd = &vmstate_k230_sysctl_reset;
+    dc->desc = "K230 sysctl reset registers";
+}
+
+static const TypeInfo k230_sysctl_reset_type_info = {
+    .name = TYPE_K230_SYSCTL_RESET,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(K230SysctlResetState),
+    .class_init = k230_sysctl_reset_class_init,
+};
+
 static void k230_sysctl_register_types(void)
 {
     type_register_static(&k230_sysctl_boot_type_info);
     type_register_static(&k230_sysctl_power_type_info);
+    type_register_static(&k230_sysctl_reset_type_info);
 }
 
 type_init(k230_sysctl_register_types)
