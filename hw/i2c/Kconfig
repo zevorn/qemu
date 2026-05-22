@@ -34,6 +34,10 @@ config K230_I2C
     bool
     select I2C
 
+config K230_OV5647
+    bool
+    select I2C
+
 config MPC_I2C
     bool
     select I2C
