@@ -3216,6 +3216,10 @@ static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
     uint64_t span;
     bool valid;
 
+    if (fetch_encoded) {
+        return false;
+    }
+
     if (!fe->dm_load_l1.valid ||
         fe->dm_load_l1.rshape >= K230_GNNE_SHAPE_COUNT ||
         !fe->shape[fe->dm_load_l1.rshape].valid ||
@@ -3415,7 +3419,7 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
     if (!deconv &&
         k230_gnne_pu_l1_input_base(fe, input_encoded, &input_base,
                                    &input_source)) {
-        /* Low fetchif sources are offsets in the current IF/L1 buffer. */
+        /* Zero fetchif sources use the current IF/L1 buffer source. */
     } else if (!k230_gnne_translate(fe, input_encoded, &input_base, NULL)) {
         PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
                         weight_encoded, weight_zp_encoded);
