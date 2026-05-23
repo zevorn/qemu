@@ -69,6 +69,9 @@
 #define K230_GNNE_SKIP_PSUM             12
 #define K230_GNNE_SKIP_ACT0             13
 
+#define K230_GNNE_PU_INPUT_GLOBAL       0
+#define K230_GNNE_PU_INPUT_L1_OFFSET    1
+
 typedef struct K230GnneScalar {
     uint32_t value;
     bool valid;
@@ -3194,9 +3197,17 @@ static bool k230_gnne_pu_read_input(uint64_t addr, uint32_t quant_type,
     }
 }
 
+typedef struct K230GnnePuInputSource {
+    uint32_t source_kind;
+    uint32_t dm_encoded;
+    uint64_t l1_base;
+    uint64_t l1_span;
+} K230GnnePuInputSource;
+
 static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
                                        uint32_t fetch_encoded,
-                                       uint64_t *input_base)
+                                       uint64_t *input_base,
+                                       K230GnnePuInputSource *source)
 {
     K230GnneShape *shape;
     K230GnneStride stride;
@@ -3229,6 +3240,10 @@ static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
     }
 
     *input_base = dm_base + fetch_encoded;
+    source->source_kind = K230_GNNE_PU_INPUT_L1_OFFSET;
+    source->dm_encoded = dm_encoded;
+    source->l1_base = dm_base;
+    source->l1_span = span;
     return true;
 }
 
@@ -3248,7 +3263,11 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
     uint32_t weight_zp_encoded = 0;
     uint32_t act0_encoded;
     uint32_t dest_encoded;
+    uint32_t input_source_flags;
     int32_t input_zp;
+    K230GnnePuInputSource input_source = {
+        .source_kind = K230_GNNE_PU_INPUT_GLOBAL,
+    };
     uint64_t input_base;
     uint64_t weight_base = 0;
     uint64_t weight_zp_base = 0;
@@ -3394,12 +3413,22 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
                         weight_encoded, weight_zp_encoded);
     }
     if (!deconv &&
-        k230_gnne_pu_l1_input_base(fe, input_encoded, &input_base)) {
+        k230_gnne_pu_l1_input_base(fe, input_encoded, &input_base,
+                                   &input_source)) {
         /* Low fetchif sources are offsets in the current IF/L1 buffer. */
     } else if (!k230_gnne_translate(fe, input_encoded, &input_base, NULL)) {
         PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
                         weight_encoded, weight_zp_encoded);
     }
+    input_source_flags = pu->quant_type |
+                         (pu->load_psum ? BIT(8) : 0) |
+                         (pu->dest_target ? BIT(9) : 0);
+    trace_k230_kpu_pu_input_source(k230_kpu_name(s), pc, tcu_id,
+                                   input_source.source_kind, input_encoded,
+                                   input_source.dm_encoded, input_base,
+                                   input_source.l1_base,
+                                   input_source.l1_span,
+                                   input_source_flags);
     if (!k230_gnne_translate(fe, weight_encoded, &weight_base, NULL) ||
         !k230_gnne_translate(fe, weight_zp_encoded, &weight_zp_base, NULL)) {
         PU_COMPUTE_SKIP(K230_GNNE_SKIP_SRC_TRANSLATE, input_encoded,
