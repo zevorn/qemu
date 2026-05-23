@@ -47,6 +47,9 @@
 #define K230_GNNE_MAX_COMMAND_SIZE      (16 * MiB)
 #define K230_GNNE_MAX_OUTPUT_SIZE       (64 * MiB)
 #define K230_GNNE_GLB_CACHE_SIZE        (4 * MiB)
+#define K230_GNNE_GLB_BANK_COUNT        K230_GNNE_MMU_COUNT
+
+#define K230_GNNE_GLB_BANK_VBASE        ((uint64_t)0x2000000000ULL)
 #define K230_GNNE_RDATA_SHADOW_SIZE     (4 * MiB)
 #define K230_GNNE_GP_COUNT              32
 #define K230_GNNE_SHAPE_COUNT           8
@@ -380,6 +383,7 @@ typedef struct K230GnneFrontend {
     uint64_t glb_cache_base;
     uint64_t glb_cache_size;
     bool glb_cache_dirty;
+    uint8_t *glb_banks[K230_GNNE_GLB_BANK_COUNT];
 } K230GnneFrontend;
 
 static K230GnneFrontend *k230_gnne_active_fe;
@@ -421,6 +425,63 @@ static bool k230_gnne_cache_access(K230GnneFrontend *fe, uint64_t addr,
     }
 
     *ptr = fe->glb_cache + offset;
+    return true;
+}
+
+static bool k230_gnne_bank_access(K230GnneFrontend *fe, uint64_t addr,
+                                  uint64_t size, uint8_t **ptr)
+{
+    uint64_t bank_offset;
+    unsigned int bank;
+    uint64_t bank_addr;
+
+    if (!fe || addr < K230_GNNE_GLB_BANK_VBASE) {
+        return false;
+    }
+
+    bank_offset = addr - K230_GNNE_GLB_BANK_VBASE;
+    bank = bank_offset / K230_GNNE_GLB_CACHE_SIZE;
+    if (bank >= K230_GNNE_GLB_BANK_COUNT) {
+        return false;
+    }
+
+    if (!fe->glb_banks[bank]) {
+        fe->glb_banks[bank] = g_malloc0(K230_GNNE_GLB_CACHE_SIZE);
+    }
+
+    bank_addr = bank_offset % K230_GNNE_GLB_CACHE_SIZE;
+    if (bank_addr > K230_GNNE_GLB_CACHE_SIZE - size) {
+        return false;
+    }
+
+    *ptr = fe->glb_banks[bank] + bank_addr;
+    return true;
+}
+
+static bool k230_gnne_bank_read(K230GnneFrontend *fe, uint64_t addr,
+                                void *buf, uint64_t size)
+{
+    uint8_t *ptr;
+
+    if (!k230_gnne_bank_access(fe, addr, size, &ptr)) {
+        return false;
+    }
+
+    memcpy(buf, ptr, size);
+    return true;
+}
+
+static bool k230_gnne_bank_write(K230GnneFrontend *fe, uint64_t addr,
+                                 const void *buf, uint64_t size)
+{
+    uint8_t *ptr;
+
+    if (!k230_gnne_bank_access(fe, addr, size, &ptr)) {
+        return false;
+    }
+
+    memcpy(ptr, buf, size);
+    fe->glb_cache_dirty = true;
     return true;
 }
 
@@ -701,6 +762,10 @@ static void k230_gnne_frontend_destroy(K230GnneFrontend *fe)
     }
 
     g_free(fe->glb_cache);
+    for (unsigned int b = 1; b < K230_GNNE_GLB_BANK_COUNT; b++) {
+        g_free(fe->glb_banks[b]);
+        fe->glb_banks[b] = NULL;
+    }
     g_free(fe->pu_psum);
 }
 
@@ -762,7 +827,7 @@ static bool k230_gnne_translate(K230GnneFrontend *fe, uint32_t encoded,
     }
 
     addr = (uint64_t)fe->mmu[mmu_id].start * 32 + offset;
-    if (UINT64_MAX - fe->glb_base < addr) {
+    if (addr >= K230_GNNE_GLB_CACHE_SIZE) {
         return false;
     }
 
@@ -770,7 +835,13 @@ static bool k230_gnne_translate(K230GnneFrontend *fe, uint32_t encoded,
         *logical = addr;
     }
     if (physical) {
-        *physical = fe->glb_base + addr;
+        if (mmu_id == 0) {
+            *physical = fe->glb_base + addr;
+        } else {
+            *physical = K230_GNNE_GLB_BANK_VBASE
+                        + (uint64_t)mmu_id * K230_GNNE_GLB_CACHE_SIZE
+                        + addr;
+        }
     }
     return true;
 }
@@ -1320,6 +1391,9 @@ static uint16_t k230_gnne_double_to_fp16(double value)
 static bool k230_gnne_dma_read_bytes(uint64_t addr, void *buf,
                                      unsigned int size)
 {
+    if (k230_gnne_bank_read(k230_gnne_active_fe, addr, buf, size)) {
+        return true;
+    }
     if (k230_gnne_cache_read(k230_gnne_active_fe, addr, buf, size)) {
         return true;
     }
@@ -1331,6 +1405,9 @@ static bool k230_gnne_dma_read_bytes(uint64_t addr, void *buf,
 static bool k230_gnne_dma_write_bytes(uint64_t addr, const void *buf,
                                       unsigned int size)
 {
+    if (k230_gnne_bank_write(k230_gnne_active_fe, addr, buf, size)) {
+        return true;
+    }
     if (k230_gnne_cache_write(k230_gnne_active_fe, addr, buf, size)) {
         return true;
     }
