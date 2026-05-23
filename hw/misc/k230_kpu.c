@@ -379,6 +379,8 @@ typedef struct K230GnneFrontend {
     uint8_t *glb_cache;
     uint64_t glb_cache_base;
     uint64_t glb_cache_size;
+    uint8_t *if_data;
+    uint64_t if_data_size;
     bool glb_cache_dirty;
 } K230GnneFrontend;
 
@@ -701,6 +703,7 @@ static void k230_gnne_frontend_destroy(K230GnneFrontend *fe)
     }
 
     g_free(fe->glb_cache);
+    g_free(fe->if_data);
     g_free(fe->pu_psum);
 }
 
@@ -3176,6 +3179,32 @@ static bool k230_gnne_read_u8(uint64_t addr, uint8_t *value)
     return k230_gnne_dma_read_bytes(addr, value, sizeof(*value));
 }
 
+static bool k230_gnne_pu_read_input_from_if(K230GnneFrontend *fe,
+                                                uint64_t offset,
+                                                uint32_t quant_type,
+                                                int32_t zero_point,
+                                                int32_t *value)
+{
+    uint8_t raw;
+
+    if (offset >= fe->if_data_size) {
+        return false;
+    }
+
+    raw = fe->if_data[offset];
+
+    switch (quant_type) {
+    case 1:
+        *value = (int32_t)raw - zero_point;
+        return true;
+    case 2:
+        *value = (int8_t)raw;
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool k230_gnne_pu_read_input(uint64_t addr, uint32_t quant_type,
                                     int32_t zero_point, int32_t *value)
 {
@@ -3202,7 +3231,51 @@ typedef struct K230GnnePuInputSource {
     uint32_t dm_encoded;
     uint64_t l1_base;
     uint64_t l1_span;
+    bool use_if;
 } K230GnnePuInputSource;
+
+static bool k230_gnne_ensure_if_data(K230GnneFrontend *fe)
+{
+    K230GnneShape *shape;
+    K230GnneStride stride;
+    uint32_t dm_encoded;
+    uint64_t dm_base;
+    uint64_t span;
+    uint8_t *ptr;
+    bool valid;
+
+    if (fe->if_data) {
+        return true;
+    }
+
+    if (!fe->dm_load_l1.valid ||
+        fe->dm_load_l1.rshape >= K230_GNNE_SHAPE_COUNT ||
+        !fe->shape[fe->dm_load_l1.rshape].valid ||
+        !k230_gnne_stride_value(fe, fe->dm_load_l1_conf.rstride_s,
+                                &stride)) {
+        return false;
+    }
+
+    shape = &fe->shape[fe->dm_load_l1.rshape];
+    if (!k230_gnne_packed_stride_footprint(shape, &stride, &span) || !span) {
+        return false;
+    }
+
+    dm_encoded = k230_gnne_gp(fe, fe->dm_load_l1.raddr_s, &valid);
+    if (!valid || !k230_gnne_translate(fe, dm_encoded, &dm_base, NULL)) {
+        return false;
+    }
+
+    if (!k230_gnne_cache_access(fe, dm_base, span, &ptr)) {
+        return false;
+    }
+
+    fe->if_data = g_malloc(span);
+    memcpy(fe->if_data, ptr, span);
+    fe->if_data_size = span;
+
+    return true;
+}
 
 static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
                                        uint32_t fetch_encoded,
@@ -3216,20 +3289,13 @@ static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
     uint64_t span;
     bool valid;
 
-    if (fetch_encoded) {
-        return false;
-    }
-
-    if (!fe->dm_load_l1.valid ||
-        fe->dm_load_l1.rshape >= K230_GNNE_SHAPE_COUNT ||
-        !fe->shape[fe->dm_load_l1.rshape].valid ||
-        !k230_gnne_stride_value(fe, fe->dm_load_l1_conf.rstride_s,
-                                &stride)) {
+    if (!k230_gnne_ensure_if_data(fe)) {
         return false;
     }
 
     shape = &fe->shape[fe->dm_load_l1.rshape];
-    if (!k230_gnne_packed_stride_footprint(shape, &stride, &span) ||
+    if (!k230_gnne_stride_value(fe, fe->dm_load_l1_conf.rstride_s, &stride) ||
+        !k230_gnne_packed_stride_footprint(shape, &stride, &span) ||
         fetch_encoded >= span) {
         return false;
     }
@@ -3239,15 +3305,13 @@ static bool k230_gnne_pu_l1_input_base(K230GnneFrontend *fe,
         return false;
     }
 
-    if (UINT64_MAX - dm_base < fetch_encoded) {
-        return false;
-    }
-
-    *input_base = dm_base + fetch_encoded;
     source->source_kind = K230_GNNE_PU_INPUT_L1_OFFSET;
     source->dm_encoded = dm_encoded;
     source->l1_base = dm_base;
     source->l1_span = span;
+    source->use_if = true;
+
+    *input_base = fetch_encoded;
     return true;
 }
 
@@ -3509,12 +3573,19 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
                                                 fe->dm_load_w_conf.kernel_w +
                                                 kx) *
                                                K230_GNNE_L2_LANE_WIDTH + ic;
-                                if (!k230_gnne_pu_read_input(input_base +
-                                                             input_index,
-                                                             pu->quant_type,
-                                                             input_zp,
-                                                             &input) ||
-                                    !k230_gnne_read_u8(weight_base +
+                                if (input_source.use_if
+                                    ? !k230_gnne_pu_read_input_from_if(
+                                          fe, input_base + input_index,
+                                          pu->quant_type, input_zp, &input)
+                                    : !k230_gnne_pu_read_input(
+                                          input_base + input_index,
+                                          pu->quant_type, input_zp, &input)) {
+                                    PU_COMPUTE_SKIP(
+                                        K230_GNNE_SKIP_SOURCE_READ,
+                                        input_base + input_index,
+                                        0, 0);
+                                }
+                                if (!k230_gnne_read_u8(weight_base +
                                                        weight_index,
                                                        &weight)) {
                                     PU_COMPUTE_SKIP(

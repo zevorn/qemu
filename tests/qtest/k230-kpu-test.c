@@ -2915,7 +2915,7 @@ static void test_pu_compute_zero_fetchif_uses_l1_source(void)
     qtest_quit(qts);
 }
 
-static void test_pu_compute_fetchif_offset_uses_global_source(void)
+static void test_pu_compute_fetchif_uses_if_staging(void)
 {
     QTestState *qts = k230_kpu_init();
     const uint8_t input[] = {
@@ -2991,7 +2991,7 @@ static void test_pu_compute_fetchif_offset_uses_global_source(void)
     k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
     qtest_memread(qts, K230_GNNE_SYNTH_CONV_OUTPUT, data, sizeof(data));
 
-    g_assert_cmphex(data[0], ==, 2);
+    g_assert_cmphex(data[0], ==, 14);
     for (size_t i = 1; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==, 0xa5);
     }
@@ -3920,8 +3920,8 @@ int main(int argc, char *argv[])
                    test_pu_compute_uses_fetchif_stride_without_l1);
     qtest_add_func("/k230-kpu/pu-compute-zero-fetchif-uses-l1-source",
                    test_pu_compute_zero_fetchif_uses_l1_source);
-    qtest_add_func("/k230-kpu/pu-compute-fetchif-offset-uses-global-source",
-                   test_pu_compute_fetchif_offset_uses_global_source);
+    qtest_add_func("/k230-kpu/pu-compute-fetchif-uses-if-staging",
+                   test_pu_compute_fetchif_uses_if_staging);
     qtest_add_func("/k230-kpu/mfu-act1-adds-psum-and-l2-u8",
                    test_mfu_act1_adds_psum_and_l2_u8);
     qtest_add_func("/k230-kpu/pu-compute-psum-classifier-stride",
