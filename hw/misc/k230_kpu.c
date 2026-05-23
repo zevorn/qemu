@@ -836,7 +836,12 @@ static bool k230_gnne_translate(K230GnneFrontend *fe, uint32_t encoded,
     }
     if (physical) {
         if (mmu_id == 0) {
-            *physical = fe->glb_base + addr;
+            if (addr >= 0x10000 && fe->mmu[1].valid) {
+                *physical = K230_GNNE_GLB_BANK_VBASE
+                            + K230_GNNE_GLB_CACHE_SIZE + addr;
+            } else {
+                *physical = fe->glb_base + addr;
+            }
         } else {
             *physical = K230_GNNE_GLB_BANK_VBASE
                         + (uint64_t)mmu_id * K230_GNNE_GLB_CACHE_SIZE
@@ -2558,6 +2563,8 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
     trace_k230_kpu_mfu_act1(k230_kpu_name(s), pc, src_logical, dst_logical,
                             arg_logical, count, deq->quant_type,
                             conf->quant_type, written, head);
+    trace_k230_kpu_mfu_act1_enc(k230_kpu_name(s), pc,
+                                src_encoded, dst_encoded, arg_encoded);
     trace_k230_kpu_mfu_act1_inputs(k230_kpu_name(s), pc, source_head,
                                    arg_head);
     fe->mfu_act1s++;
@@ -4454,6 +4461,10 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
         fe->mmu[rs].depth = k230_gnne_gp(fe, extract32(word, 12, 5),
                                          &valid);
         fe->mmu[rs].valid &= valid;
+        if (rs == 0 && valid) {
+            fe->mmu[1] = fe->mmu[0];
+            fe->mmu[2] = fe->mmu[0];
+        }
         break;
     case 0x46:
         k230_gnne_l2_load_conf(fe, word);
