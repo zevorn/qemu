@@ -1142,6 +1142,16 @@ static bool k230_gnne_source_read(K230GnneFrontend *fe, uint64_t source,
     uint64_t rdata_offset;
     uint64_t physical;
 
+    if (fe->runtime_window && fe->rdata_base_valid &&
+        source >= fe->rdata_base) {
+        rdata_offset = source - fe->rdata_base;
+        if (rdata_offset < K230_GNNE_RUNTIME_ARG_PREFIX &&
+            size <= K230_GNNE_RUNTIME_ARG_PREFIX - rdata_offset &&
+            k230_gnne_rdata_shadow_read(fe, source, buf, size)) {
+            return true;
+        }
+    }
+
     if (k230_gnne_runtime_ddr_source_addr(fe, source, &physical) &&
         dma_memory_read(&address_space_memory, physical, buf, size,
                         MEMTXATTRS_UNSPECIFIED) == MEMTX_OK) {
