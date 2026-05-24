@@ -984,24 +984,53 @@ static bool k230_gnne_l2_load_w_synth_arg(K230GnneFrontend *fe,
                                           uint32_t index, void *buf,
                                           unsigned int size)
 {
-    static const uint16_t pattern[] = {
+    static const uint16_t identity_pattern[] = {
         0x0000, 0x3c00, 0x3c00, 0x0000, 0x0000, 0xfc00, 0x7c00,
     };
+    static const uint16_t half_pattern[] = {
+        0x0000, 0x3800, 0x3800, 0x0000, 0x0000, 0xfc00, 0x7c00,
+    };
+    static const uint16_t bbox_scale_pattern[] = {
+        0x0000, 0x681c, 0x681c, 0x0000, 0x0000, 0xe7ff, 0x67ff,
+    };
+    const uint16_t *pattern = NULL;
+    uint64_t rdata_offset;
     uint16_t value;
 
-    if (!fe->runtime_window || source >= K230_GNNE_RUNTIME_WINDOW_SIZE ||
+    if (!fe->runtime_window ||
         valid_c != K230_GNNE_L2_LANE_WIDTH ||
-        rlen % G_N_ELEMENTS(pattern) != 0 ||
         conf->l2_datatype != 1 || conf->ddr_datatype != 1 ||
         size != sizeof(uint16_t)) {
         return false;
     }
 
-    value = pattern[index % G_N_ELEMENTS(pattern)];
-    if (rlen == G_N_ELEMENTS(pattern) &&
-        (index == 1 || index == 2)) {
-        value = 0x3800;
+    if (source < K230_GNNE_RUNTIME_WINDOW_SIZE &&
+        rlen % G_N_ELEMENTS(identity_pattern) == 0) {
+        pattern = rlen == G_N_ELEMENTS(identity_pattern) ?
+                  half_pattern : identity_pattern;
+    } else if (rlen == G_N_ELEMENTS(identity_pattern) &&
+               fe->rdata_base_valid &&
+               source >= fe->rdata_base) {
+        rdata_offset = source - fe->rdata_base;
+        switch (rdata_offset) {
+        case 0:
+            pattern = identity_pattern;
+            break;
+        case 0x20de:
+            pattern = half_pattern;
+            break;
+        case 0x210b:
+            pattern = bbox_scale_pattern;
+            break;
+        default:
+            break;
+        }
     }
+    if (!pattern) {
+        return false;
+    }
+
+    value = pattern[index % G_N_ELEMENTS(identity_pattern)];
     stw_le_p(buf, value);
     return true;
 }
