@@ -1424,6 +1424,17 @@ static uint64_t k230_gnne_head_le_p(const void *buf, uint64_t size)
     return ldq_le_p(head);
 }
 
+static void k230_gnne_hash_update(uint64_t *hash, const void *buf,
+                                  uint64_t size)
+{
+    const uint8_t *bytes = buf;
+
+    for (uint64_t i = 0; i < size; i++) {
+        *hash ^= bytes[i];
+        *hash *= UINT64_C(0x100000001b3);
+    }
+}
+
 static bool k230_gnne_read_fp16(uint64_t addr, double *value)
 {
     uint8_t buf[2];
@@ -1575,7 +1586,7 @@ static bool k230_gnne_l2_conf_sizes(K230GnneL2Conf *conf,
 }
 
 static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
-                              uint32_t word)
+                              uint32_t word, uint64_t pc)
 {
     K230GnneL2Conf *conf = &fe->l2_load_conf;
     K230GnneShape *shape;
@@ -1593,6 +1604,11 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t total_count;
     uint64_t copied = 0;
     uint64_t head = 0;
+    uint8_t dest_head_buf[8] = {};
+    uint64_t dest_head_size = 0;
+    uint64_t source_hash = UINT64_C(0xcbf29ce484222325);
+    uint64_t dest_hash = UINT64_C(0xcbf29ce484222325);
+    bool trace_hash = trace_event_get_state(TRACE_K230_KPU_L2_LOAD_HASH);
     bool head_valid = false;
     bool valid;
 
@@ -1651,6 +1667,10 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
                     head = k230_gnne_head_le_p(line, shape->w * src_size);
                     head_valid = true;
                 }
+                if (trace_hash) {
+                    k230_gnne_hash_update(&source_hash, line,
+                                          (uint64_t)shape->w * src_size);
+                }
 
                 for (uint32_t w = 0; w < shape->w; w++) {
                     uint64_t dst_off = dst_base + dst_line +
@@ -1659,6 +1679,19 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
 
                     k230_gnne_l2_load_item(item, line + w * src_size, conf,
                                            src_size, dst_size);
+                    if (trace_hash &&
+                        dest_head_size < sizeof(dest_head_buf)) {
+                        unsigned int chunk =
+                            MIN(dst_size,
+                                (unsigned int)(sizeof(dest_head_buf) -
+                                               dest_head_size));
+
+                        memcpy(dest_head_buf + dest_head_size, item, chunk);
+                        dest_head_size += chunk;
+                    }
+                    if (trace_hash) {
+                        k230_gnne_hash_update(&dest_hash, item, dst_size);
+                    }
                     if (!k230_gnne_dma_write_bytes(dst_off, item,
                                                    dst_size)) {
                         return;
@@ -1669,6 +1702,14 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
         }
     }
 
+    trace_k230_kpu_l2_load_detail(k230_kpu_name(s), pc, src_addr,
+                                  dst_logical, rshape, src_size, dst_size);
+    if (trace_hash) {
+        trace_k230_kpu_l2_load_hash(
+            k230_kpu_name(s), pc, head,
+            k230_gnne_head_le_p(dest_head_buf, dest_head_size), source_hash,
+            dest_hash);
+    }
     trace_k230_kpu_l2_load(k230_kpu_name(s), src_addr, dst_logical, copied,
                            head);
     fe->l2_loads++;
@@ -1824,6 +1865,13 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t dst_logical = 0;
     uint64_t total_count;
     uint64_t copied = 0;
+    uint8_t source_head_buf[8] = {};
+    uint8_t dest_head_buf[8] = {};
+    uint64_t source_head_size = 0;
+    uint64_t dest_head_size = 0;
+    uint64_t source_hash = UINT64_C(0xcbf29ce484222325);
+    uint64_t dest_hash = UINT64_C(0xcbf29ce484222325);
+    bool trace_hash = trace_event_get_state(TRACE_K230_KPU_L2_STORE_HASH);
     bool valid;
     bool dst_direct_physical;
 
@@ -1941,8 +1989,35 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                                                      rshape, copied);
                         return;
                     }
+                    if (trace_hash &&
+                        source_head_size < sizeof(source_head_buf)) {
+                        unsigned int chunk =
+                            MIN(src_size,
+                                (unsigned int)(sizeof(source_head_buf) -
+                                               source_head_size));
+
+                        memcpy(source_head_buf + source_head_size, item,
+                               chunk);
+                        source_head_size += chunk;
+                    }
+                    if (trace_hash) {
+                        k230_gnne_hash_update(&source_hash, item, src_size);
+                    }
                     k230_gnne_l2_store_item(out, item, conf, src_size,
                                             dst_size);
+                    if (trace_hash &&
+                        dest_head_size < sizeof(dest_head_buf)) {
+                        unsigned int chunk =
+                            MIN(dst_size,
+                                (unsigned int)(sizeof(dest_head_buf) -
+                                               dest_head_size));
+
+                        memcpy(dest_head_buf + dest_head_size, out, chunk);
+                        dest_head_size += chunk;
+                    }
+                    if (trace_hash) {
+                        k230_gnne_hash_update(&dest_hash, out, dst_size);
+                    }
                     if (!k230_gnne_dma_write_bytes(dst_off, out, dst_size)) {
                         trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
                                                      K230_GNNE_SKIP_DEST_WRITE,
@@ -1978,6 +2053,15 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
         }
     }
 
+    trace_k230_kpu_l2_store_detail(k230_kpu_name(s), pc, src_logical,
+                                   dst_logical, rshape, src_size, dst_size);
+    if (trace_hash) {
+        trace_k230_kpu_l2_store_hash(
+            k230_kpu_name(s), pc,
+            k230_gnne_head_le_p(source_head_buf, source_head_size),
+            k230_gnne_head_le_p(dest_head_buf, dest_head_size), source_hash,
+            dest_hash);
+    }
     trace_k230_kpu_l2_store(k230_kpu_name(s), dst_logical, dst_base, copied);
     fe->l2_stores++;
     fe->output_bytes += copied;
@@ -4467,7 +4551,7 @@ static void k230_gnne_step(K230KpuState *s, K230GnneFrontend *fe,
         k230_gnne_l2_store_conf(fe, word);
         break;
     case 0x4c:
-        k230_gnne_l2_load(s, fe, word);
+        k230_gnne_l2_load(s, fe, word, pc);
         break;
     case 0x4d:
         k230_gnne_pu_compute(s, fe, word, pc);
