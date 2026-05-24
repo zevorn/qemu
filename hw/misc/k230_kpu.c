@@ -3634,7 +3634,14 @@ static void k230_gnne_pu_compute(K230KpuState *s, K230GnneFrontend *fe,
             PU_COMPUTE_SKIP(K230_GNNE_SKIP_ACT0,
                             fe->dm_load_act0.raddr_s, 0, 0);
         }
-        dest_encoded = k230_gnne_gp(fe, fe->act0_compute.raddr_d, &valid);
+        if (fe->dm_store_of.valid) {
+            dest_encoded = k230_gnne_gp(fe, fe->dm_store_of.raddr_d, &valid);
+        } else {
+            valid = false;
+        }
+        if (!valid) {
+            dest_encoded = k230_gnne_gp(fe, fe->act0_compute.raddr_d, &valid);
+        }
         if (!valid) {
             dest_encoded = k230_gnne_gp(fe, pu->raddr_d, &valid);
         }

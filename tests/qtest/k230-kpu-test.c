@@ -2605,6 +2605,92 @@ static void test_pu_compute_conv2d_act0_u8(void)
     qtest_quit(qts);
 }
 
+static void test_pu_compute_dm_store_of_act0_dest(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t input[] = {
+        1, 2,
+        3, 4,
+    };
+    const uint8_t weight_zp[] = {
+        3,
+    };
+    const uint8_t act0_table[] = {
+        0x00, 0x3c,             /* negative slope 1 */
+        0x00, 0x3c,             /* positive slope 1 */
+        0x00, 0x00,             /* negative bias 0 */
+        0x00, 0x00,             /* positive bias 0 */
+        0x00, 0x00,             /* lower 0 */
+        0xf8, 0x5b,             /* upper 255 */
+        0x00, 0x00,             /* threshold 0 */
+    };
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x100),
+        GNNE_ADDI(3, 0, 0x500),
+        GNNE_ADDI(4, 0, 0x520),
+        GNNE_ADDI(5, 0, 0x590),
+        GNNE_ADDI(6, 0, 0x5a0),
+        GNNE_ADDI(7, 0, 0x5c0),
+        GNNE_ADDI(8, 0, 1),
+        GNNE_ADDI(9, 0, 2),
+        GNNE_ADDI(10, 0, 4),
+        GNNE_ADDI(11, 0, 2),
+        GNNE_MMU_CONF(0, 2, 0),
+        GNNE_SS_PACK_SHAPE(8, 8, 9, 9, 0),
+        GNNE_SS_PACK_SHAPE(8, 8, 8, 8, 1),
+        GNNE_SS_PACK_STRIDE(10, 10, 9, 0),
+        GNNE_SS_PACK_STRIDE(8, 8, 8, 1),
+        GNNE_DM_LOAD_L1_CONF(0, 0, 0, 0, 0),
+        GNNE_DM_LOAD_L1(0, 0, 3, 0, 0, 0),
+        GNNE_DM_LOAD_W_CONF(0, 0, 2, 2, 0),
+        GNNE_DM_LOAD_W_CONF_DEQ(0, 0, 1),
+        GNNE_DM_LOAD_W_CONF2(0, 0, 8, 8),
+        GNNE_DM_LOAD_W(0, 0, 4, 5, 0, 0),
+        GNNE_DM_LOAD_ACT0(0, 0, 6, 0, 0, 1),
+        GNNE_PU_FETCHIF_CONF1(0, 0, 1, 1, 0),
+        GNNE_PU_FETCHIF_CONF2(0, 0, 8, 0),
+        GNNE_PU_FETCHIF_CONF3(0, 0, 3, 8, 0),
+        GNNE_PU_FETCHIF_CONF4(0, 0, 0, 0),
+        GNNE_PU_FETCHIF_CONF_DEQ(0, 0, 8, 11, 1),
+        GNNE_PU_W_CONF(0, 0, 2, 2),
+        GNNE_PU_OF_CONF1(0, 0, 8, 0, 1),
+        GNNE_PU_OF_CONF2(0, 0, 7, 1),
+        GNNE_DM_STORE_OF(0, 0, 7, 1, 0),
+        GNNE_PU_COMPUTE_CONF(0, 0, 0, 0, 1, 1, 0),
+        GNNE_ACT0_SRC1_CONF(0, 0, 0, 1, 0),
+        GNNE_ACT0_COMPUTE(0, 0, 0, 0, 0, 1),
+        GNNE_PU_COMPUTE(0, 0),
+    };
+    uint8_t weights[80] = {};
+    uint8_t data[4];
+
+    weights[0] = 4;
+    weights[24] = 5;
+    weights[48] = 6;
+    weights[72] = 7;
+    qtest_memwrite(qts, K230_GNNE_SYNTH_CONV_INPUT, input, sizeof(input));
+    qtest_memwrite(qts, K230_GNNE_SYNTH_CONV_WEIGHT, weights,
+                   sizeof(weights));
+    qtest_memwrite(qts, K230_GNNE_SYNTH_CONV_WEIGHT_ZP, weight_zp,
+                   sizeof(weight_zp));
+    qtest_memwrite(qts, K230_GNNE_SYNTH_CONV_ACT0, act0_table,
+                   sizeof(act0_table));
+    qtest_memset(qts, K230_GNNE_SYNTH_CONV_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_CONV_OUTPUT, data, sizeof(data));
+
+    g_assert_cmphex(data[0], ==, 10);
+    for (size_t i = 1; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==, 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_pu_compute_conv2d_i8_input_act0_u8(void)
 {
     QTestState *qts = k230_kpu_init();
@@ -4246,6 +4332,8 @@ int main(int argc, char *argv[])
                    test_mfu_pdp1_sliding_min_u8);
     qtest_add_func("/k230-kpu/pu-compute-conv2d-act0-u8",
                    test_pu_compute_conv2d_act0_u8);
+    qtest_add_func("/k230-kpu/pu-compute-dm-store-of-act0-dest",
+                   test_pu_compute_dm_store_of_act0_dest);
     qtest_add_func("/k230-kpu/pu-compute-conv2d-i8-input-act0-u8",
                    test_pu_compute_conv2d_i8_input_act0_u8);
     qtest_add_func("/k230-kpu/pu-compute-conv2d-packed-if-stride",
