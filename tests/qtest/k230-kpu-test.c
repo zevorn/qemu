@@ -815,6 +815,95 @@ static void test_l2_load_copies_to_glb(void)
     qtest_quit(qts);
 }
 
+static void test_l2_load_uses_packed_strides(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x11, 0x12, 0xa5, 0xa5, 0xa5, 0x21, 0x22, 0xa5,
+        0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0x31,
+        0x32, 0xa5, 0xa5, 0xa5, 0x41, 0x42, 0xa5, 0xa5,
+    };
+    const uint8_t expected[] = {
+        0x11, 0x12, 0x21, 0x22, 0x31, 0x32, 0x41, 0x42,
+    };
+    const uint32_t commands[] = {
+        GNNE_LUI(6, K230_GNNE_SYNTH_SOURCE >> 12),
+        GNNE_ADDI(3, 0, 0x240),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(9, 0, 2),
+        GNNE_ADDI(10, 0, 3),
+        GNNE_ADDI(11, 0, 5),
+        GNNE_MMU_CONF(0, 9, 0),
+        GNNE_SS_PACK_SHAPE(4, 9, 9, 9, 0),
+        GNNE_SS_PACK_STRIDE(9, 10, 11, 0),
+        GNNE_SS_PACK_STRIDE(9, 9, 9, 1),
+        GNNE_L2_LOAD_CONF(1, 0, 0, 0),
+        GNNE_L2_LOAD(3, 6, 0),
+    };
+    uint8_t data[12];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_SOURCE, source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_LOAD_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_LOAD_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(expected) ? expected[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_l2_store_uses_packed_strides(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x11, 0x12, 0xa5, 0xa5, 0xa5, 0x21, 0x22, 0xa5,
+        0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0x31,
+        0x32, 0xa5, 0xa5, 0xa5, 0x41, 0x42, 0xa5, 0xa5,
+    };
+    const uint8_t expected[] = {
+        0x11, 0x12, 0x21, 0x22, 0x31, 0x32, 0x41, 0x42,
+    };
+    const uint32_t commands[] = {
+        GNNE_ADDI(2, 0, 0x340),
+        GNNE_ADDI(3, 0, 0x180),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(9, 0, 2),
+        GNNE_ADDI(10, 0, 3),
+        GNNE_ADDI(11, 0, 5),
+        GNNE_MMU_CONF(0, 9, 0),
+        GNNE_SS_PACK_SHAPE(4, 9, 9, 9, 0),
+        GNNE_SS_PACK_STRIDE(9, 10, 11, 0),
+        GNNE_SS_PACK_STRIDE(9, 9, 9, 1),
+        GNNE_L2_STORE_CONF(1, 0, 0, 0),
+        GNNE_L2_STORE(3, 2, 0),
+    };
+    uint8_t data[12];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_STORE_SOURCE,
+                   source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(expected) ? expected[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_l2_store_reads_high_mmu0_glb(void)
 {
     QTestState *qts = k230_kpu_init();
@@ -1550,7 +1639,7 @@ static void test_l2_store_conf_latches_stride(void)
     k230_kpu_command_u32(commands, &command_size,
                          GNNE_SS_PACK_SHAPE(4, 5, 4, 5, 0));
     k230_kpu_command_u32(commands, &command_size,
-                         GNNE_SS_PACK_STRIDE(6, 5, 5, 1));
+                         GNNE_SS_PACK_STRIDE(5, 4, 5, 1));
     k230_kpu_command_u32(commands, &command_size,
                          GNNE_L2_STORE_CONF(1, 1, 0, 0));
     k230_kpu_command_u32(commands, &command_size,
@@ -3890,6 +3979,10 @@ int main(int argc, char *argv[])
                    test_l2_store_converts_fp16_to_fp32);
     qtest_add_func("/k230-kpu/l2-load-copies-to-glb",
                    test_l2_load_copies_to_glb);
+    qtest_add_func("/k230-kpu/l2-load-uses-packed-strides",
+                   test_l2_load_uses_packed_strides);
+    qtest_add_func("/k230-kpu/l2-store-uses-packed-strides",
+                   test_l2_store_uses_packed_strides);
     qtest_add_func("/k230-kpu/l2-store-reads-high-mmu0-glb",
                    test_l2_store_reads_high_mmu0_glb);
     qtest_add_func("/k230-kpu/l2-load-converts-fp32-to-fp16",

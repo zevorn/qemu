@@ -1561,6 +1561,10 @@ static bool k230_gnne_shape_product(K230GnneFrontend *fe, unsigned int index,
     return k230_gnne_shape_count(&fe->shape[index], count);
 }
 
+static bool k230_gnne_packed_offset4(K230GnneStride *stride, uint32_t n,
+                                     uint32_t c, uint32_t h, uint32_t w,
+                                     uint64_t *offset);
+
 static bool k230_gnne_stride_value(K230GnneFrontend *fe, unsigned int index,
                                    K230GnneStride *stride)
 {
@@ -1603,13 +1607,13 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
     uint64_t dst_logical;
     uint64_t total_count;
     uint64_t copied = 0;
-    uint64_t head = 0;
+    uint8_t source_head_buf[8] = {};
     uint8_t dest_head_buf[8] = {};
+    uint64_t source_head_size = 0;
     uint64_t dest_head_size = 0;
     uint64_t source_hash = UINT64_C(0xcbf29ce484222325);
     uint64_t dest_hash = UINT64_C(0xcbf29ce484222325);
     bool trace_hash = trace_event_get_state(TRACE_K230_KPU_L2_LOAD_HASH);
-    bool head_valid = false;
     bool valid;
 
     src_addr = k230_gnne_gp(fe, raddr_s, &valid);
@@ -1638,47 +1642,41 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
     for (uint32_t n = 0; n < shape->n; n++) {
         for (uint32_t c = 0; c < shape->c; c++) {
             for (uint32_t h = 0; h < shape->h; h++) {
-                uint64_t src_index;
-                uint64_t dst_index;
-                uint64_t src_line;
-                uint64_t dst_line;
-                g_autofree uint8_t *line = NULL;
-
-                src_index = (uint64_t)n * src_stride.n +
-                            (uint64_t)c * src_stride.c +
-                            (uint64_t)h * src_stride.h;
-                dst_index = (uint64_t)n * dst_stride.n +
-                            (uint64_t)c * dst_stride.c +
-                            (uint64_t)h * dst_stride.h;
-                if (umul64_overflow(src_index, src_size, &src_line) ||
-                    umul64_overflow(dst_index, dst_size, &dst_line) ||
-                    UINT64_MAX - src_addr < src_line ||
-                    UINT64_MAX - dst_base < dst_line ||
-                    shape->w > K230_GNNE_MAX_OUTPUT_SIZE / src_size) {
-                    return;
-                }
-
-                line = g_malloc(shape->w * src_size);
-                if (!k230_gnne_source_read(fe, src_addr + src_line,
-                                           line, shape->w * src_size)) {
-                    return;
-                }
-                if (!head_valid && shape->w * src_size) {
-                    head = k230_gnne_head_le_p(line, shape->w * src_size);
-                    head_valid = true;
-                }
-                if (trace_hash) {
-                    k230_gnne_hash_update(&source_hash, line,
-                                          (uint64_t)shape->w * src_size);
-                }
-
                 for (uint32_t w = 0; w < shape->w; w++) {
-                    uint64_t dst_off = dst_base + dst_line +
-                                       (uint64_t)w * dst_size;
+                    uint64_t src_index;
+                    uint64_t dst_index;
+                    uint64_t src_off;
+                    uint64_t dst_off;
+                    uint8_t raw[4] = {};
                     uint8_t item[4] = {};
 
-                    k230_gnne_l2_load_item(item, line + w * src_size, conf,
-                                           src_size, dst_size);
+                    if (!k230_gnne_packed_offset4(&src_stride, n, c, h, w,
+                                                  &src_index) ||
+                        !k230_gnne_packed_offset4(&dst_stride, n, c, h, w,
+                                                  &dst_index) ||
+                        umul64_overflow(src_index, src_size, &src_off) ||
+                        umul64_overflow(dst_index, dst_size, &dst_off) ||
+                        UINT64_MAX - src_addr < src_off ||
+                        UINT64_MAX - dst_base < dst_off) {
+                        return;
+                    }
+                    if (!k230_gnne_source_read(fe, src_addr + src_off, raw,
+                                               src_size)) {
+                        return;
+                    }
+                    if (source_head_size < sizeof(source_head_buf)) {
+                        unsigned int chunk =
+                            MIN(src_size,
+                                (unsigned int)(sizeof(source_head_buf) -
+                                               source_head_size));
+
+                        memcpy(source_head_buf + source_head_size, raw, chunk);
+                        source_head_size += chunk;
+                    }
+                    if (trace_hash) {
+                        k230_gnne_hash_update(&source_hash, raw, src_size);
+                    }
+                    k230_gnne_l2_load_item(item, raw, conf, src_size, dst_size);
                     if (trace_hash &&
                         dest_head_size < sizeof(dest_head_buf)) {
                         unsigned int chunk =
@@ -1692,7 +1690,7 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
                     if (trace_hash) {
                         k230_gnne_hash_update(&dest_hash, item, dst_size);
                     }
-                    if (!k230_gnne_dma_write_bytes(dst_off, item,
+                    if (!k230_gnne_dma_write_bytes(dst_base + dst_off, item,
                                                    dst_size)) {
                         return;
                     }
@@ -1706,12 +1704,14 @@ static void k230_gnne_l2_load(K230KpuState *s, K230GnneFrontend *fe,
                                   dst_logical, rshape, src_size, dst_size);
     if (trace_hash) {
         trace_k230_kpu_l2_load_hash(
-            k230_kpu_name(s), pc, head,
+            k230_kpu_name(s), pc,
+            k230_gnne_head_le_p(source_head_buf, source_head_size),
             k230_gnne_head_le_p(dest_head_buf, dest_head_size), source_hash,
             dest_hash);
     }
     trace_k230_kpu_l2_load(k230_kpu_name(s), src_addr, dst_logical, copied,
-                           head);
+                           k230_gnne_head_le_p(source_head_buf,
+                                               source_head_size));
     fe->l2_loads++;
     fe->input_bytes += copied;
 }
@@ -1949,39 +1949,34 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
     for (uint32_t n = 0; n < shape->n; n++) {
         for (uint32_t c = 0; c < shape->c; c++) {
             for (uint32_t h = 0; h < shape->h; h++) {
-                uint64_t src_index;
-                uint64_t dst_index;
-                uint64_t src_line;
-                uint64_t dst_line;
-
-                src_index = (uint64_t)n * src_stride.n +
-                            (uint64_t)c * src_stride.c +
-                            (uint64_t)h * src_stride.h;
-                dst_index = (uint64_t)n * dst_stride.n +
-                            (uint64_t)c * dst_stride.c +
-                            (uint64_t)h * dst_stride.h;
-                if (umul64_overflow(src_index, src_size, &src_line) ||
-                    umul64_overflow(dst_index, dst_size, &dst_line) ||
-                    UINT64_MAX - src_base < src_line ||
-                    UINT64_MAX - dst_base < dst_line ||
-                    shape->w > K230_GNNE_MAX_OUTPUT_SIZE / dst_size) {
-                    trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
-                                                 K230_GNNE_SKIP_OVERFLOW,
-                                                 src_logical, dst_logical,
-                                                 rshape, copied);
-                    return;
-                }
-
                 for (uint32_t w = 0; w < shape->w; w++) {
-                    uint64_t src_off = src_base + src_line +
-                                       (uint64_t)w * src_size;
-                    uint64_t dst_off = dst_base + dst_line +
-                                       (uint64_t)w * dst_size;
+                    uint64_t src_index;
+                    uint64_t dst_index;
+                    uint64_t src_byte;
+                    uint64_t dst_byte;
+                    uint64_t src_off;
+                    uint64_t dst_off;
                     uint64_t mirror_base;
                     uint64_t mirror_off;
                     uint8_t item[4] = {};
                     uint8_t out[4] = {};
 
+                    if (!k230_gnne_packed_offset4(&src_stride, n, c, h, w,
+                                                  &src_index) ||
+                        !k230_gnne_packed_offset4(&dst_stride, n, c, h, w,
+                                                  &dst_index) ||
+                        umul64_overflow(src_index, src_size, &src_byte) ||
+                        umul64_overflow(dst_index, dst_size, &dst_byte) ||
+                        UINT64_MAX - src_base < src_byte ||
+                        UINT64_MAX - dst_base < dst_byte) {
+                        trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
+                                                     K230_GNNE_SKIP_OVERFLOW,
+                                                     src_logical, dst_logical,
+                                                     rshape, copied);
+                        return;
+                    }
+                    src_off = src_base + src_byte;
+                    dst_off = dst_base + dst_byte;
                     if (!k230_gnne_dma_read_bytes(src_off, item, src_size)) {
                         trace_k230_kpu_l2_store_skip(k230_kpu_name(s), pc,
                                                      K230_GNNE_SKIP_DEST_WRITE,
@@ -2027,17 +2022,14 @@ static void k230_gnne_l2_store(K230KpuState *s, K230GnneFrontend *fe,
                     }
                     if (k230_gnne_runtime_ddr_addr(fe, dst_logical,
                                                    &mirror_base)) {
-                        if (UINT64_MAX - mirror_base < dst_line ||
-                            UINT64_MAX - mirror_base - dst_line <
-                            (uint64_t)w * dst_size) {
+                        if (UINT64_MAX - mirror_base < dst_byte) {
                             trace_k230_kpu_l2_store_skip(
                                 k230_kpu_name(s), pc,
                                 K230_GNNE_SKIP_OVERFLOW, src_off,
                                 mirror_base, rshape, copied);
                             return;
                         }
-                        mirror_off = mirror_base + dst_line +
-                                     (uint64_t)w * dst_size;
+                        mirror_off = mirror_base + dst_byte;
                         if (!k230_gnne_dma_write_bytes(mirror_off, out,
                                                        dst_size)) {
                             trace_k230_kpu_l2_store_skip(
@@ -2313,10 +2305,6 @@ static uint32_t k230_gnne_mfu_channel(K230GnneFrontend *fe, uint64_t index)
 
     return (index / plane) % shape->c;
 }
-
-static bool k230_gnne_packed_offset4(K230GnneStride *stride, uint32_t n,
-                                     uint32_t c, uint32_t h, uint32_t w,
-                                     uint64_t *offset);
 
 static bool k230_gnne_linear_coords4(const K230GnneShape *shape,
                                      uint64_t index, uint32_t *n,
