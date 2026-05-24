@@ -2504,7 +2504,7 @@ static void k230_gnne_mfu_act1(K230KpuState *s, K230GnneFrontend *fe,
         conf->funct4 > 1) {
         return;
     }
-    binary_source = k230_gnne_mfu_binary_source(conf);
+    binary_source = raddr_s2 && k230_gnne_mfu_binary_source(conf);
 
     dst_encoded = k230_gnne_gp(fe, raddr_d1, &valid);
     if (!valid) {
