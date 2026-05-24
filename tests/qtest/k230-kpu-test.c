@@ -3329,17 +3329,17 @@ static void test_pu_compute_zero_fetchif_uses_l1_source(void)
     qtest_quit(qts);
 }
 
-static void test_pu_compute_fetchif_offset_uses_global_source(void)
+static void test_pu_compute_fetchif_offset_uses_if_staging(void)
 {
     QTestState *qts = k230_kpu_init();
-    const uint8_t input[] = {
-        5, 7,
+    const uint8_t input[5] = {
+        5, 99, 88, 77, 7,
     };
     const uint8_t global_input[] = {
         1, 1,
     };
     const uint8_t weight_zp[] = {
-        1,
+        0,
     };
     const uint8_t act0_table[] = {
         0x00, 0x3c,             /* negative slope 1 */
@@ -3359,15 +3359,16 @@ static void test_pu_compute_fetchif_offset_uses_global_source(void)
         GNNE_ADDI(7, 0, 0x5c0),
         GNNE_ADDI(8, 0, 1),
         GNNE_ADDI(9, 0, 2),
-        GNNE_ADDI(10, 0, 0),
+        GNNE_ADDI(10, 0, 4),
         GNNE_ADDI(11, 0, 0),
         GNNE_ADDI(12, 0, 1),
         GNNE_MMU_CONF(0, 2, 0),
-        GNNE_SS_PACK_SHAPE(8, 8, 8, 9, 2),
+        GNNE_SS_PACK_SHAPE(8, 9, 8, 8, 2),
         GNNE_SS_PACK_SHAPE(8, 8, 8, 8, 1),
         GNNE_SS_PACK_STRIDE(8, 8, 8, 0),
         GNNE_SS_PACK_STRIDE(8, 8, 8, 1),
-        GNNE_DM_LOAD_L1_CONF(0, 0, 0, 0, 0),
+        GNNE_SS_PACK_STRIDE(8, 10, 8, 3),
+        GNNE_DM_LOAD_L1_CONF(0, 0, 3, 0, 0),
         GNNE_DM_LOAD_L1(0, 0, 3, 0, 2, 0),
         GNNE_DM_LOAD_W_CONF(0, 0, 1, 1, 0),
         GNNE_DM_LOAD_W_CONF_DEQ(0, 0, 1),
@@ -3391,6 +3392,7 @@ static void test_pu_compute_fetchif_offset_uses_global_source(void)
     uint8_t data[4];
 
     weights[0] = 3;
+    weights[1] = 4;
     qtest_memwrite(qts, K230_GNNE_SYNTH_CONV_INPUT, input, sizeof(input));
     qtest_memwrite(qts, K230_GNNE_SYNTH_GLB_BASE + 1,
                    global_input, sizeof(global_input));
@@ -3405,7 +3407,7 @@ static void test_pu_compute_fetchif_offset_uses_global_source(void)
     k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
     qtest_memread(qts, K230_GNNE_SYNTH_CONV_OUTPUT, data, sizeof(data));
 
-    g_assert_cmphex(data[0], ==, 2);
+    g_assert_cmphex(data[0], ==, 21);
     for (size_t i = 1; i < sizeof(data); i++) {
         g_assert_cmphex(data[i], ==, 0xa5);
     }
@@ -4348,8 +4350,8 @@ int main(int argc, char *argv[])
                    test_pu_compute_uses_fetchif_stride_without_l1);
     qtest_add_func("/k230-kpu/pu-compute-zero-fetchif-uses-l1-source",
                    test_pu_compute_zero_fetchif_uses_l1_source);
-    qtest_add_func("/k230-kpu/pu-compute-fetchif-offset-uses-global-source",
-                   test_pu_compute_fetchif_offset_uses_global_source);
+    qtest_add_func("/k230-kpu/pu-compute-fetchif-offset-uses-if-staging",
+                   test_pu_compute_fetchif_offset_uses_if_staging);
     qtest_add_func("/k230-kpu/mfu-act1-adds-psum-and-l2-u8",
                    test_mfu_act1_adds_psum_and_l2_u8);
     qtest_add_func("/k230-kpu/pu-compute-psum-classifier-stride",
