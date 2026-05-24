@@ -815,6 +815,44 @@ static void test_l2_load_copies_to_glb(void)
     qtest_quit(qts);
 }
 
+static void test_l2_store_reads_high_mmu0_glb(void)
+{
+    QTestState *qts = k230_kpu_init();
+    const uint8_t source[] = {
+        0x6a, 0x6b, 0x6c, 0x6d,
+    };
+    const uint32_t commands[] = {
+        GNNE_LUI(2, 0x12),
+        GNNE_ADDI(3, 0, 0x180),
+        GNNE_ADDI(4, 0, 1),
+        GNNE_ADDI(5, 0, sizeof(source)),
+        GNNE_MMU_CONF(0, 4, 0),
+        GNNE_SS_PACK_SHAPE(4, 4, 4, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 0),
+        GNNE_SS_PACK_STRIDE(5, 5, 5, 1),
+        GNNE_L2_STORE_CONF(1, 0, 0, 0),
+        GNNE_L2_STORE(3, 2, 0),
+    };
+    uint8_t data[8];
+
+    qtest_memwrite(qts, K230_GNNE_SYNTH_GLB_BASE + 0x12000,
+                   source, sizeof(source));
+    qtest_memset(qts, K230_GNNE_SYNTH_OUTPUT, 0xa5, sizeof(data));
+
+    k230_kpu_run_commands(qts, commands, G_N_ELEMENTS(commands));
+    qtest_memread(qts, K230_GNNE_SYNTH_OUTPUT, data, sizeof(data));
+
+    for (size_t i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==,
+                        i < sizeof(source) ? source[i] : 0xa5);
+    }
+
+    k230_kpu_assert_done_irq(qts);
+    k230_kpu_clear_done_irq(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_l2_load_converts_fp32_to_fp16(void)
 {
     QTestState *qts = k230_kpu_init();
@@ -3852,6 +3890,8 @@ int main(int argc, char *argv[])
                    test_l2_store_converts_fp16_to_fp32);
     qtest_add_func("/k230-kpu/l2-load-copies-to-glb",
                    test_l2_load_copies_to_glb);
+    qtest_add_func("/k230-kpu/l2-store-reads-high-mmu0-glb",
+                   test_l2_store_reads_high_mmu0_glb);
     qtest_add_func("/k230-kpu/l2-load-converts-fp32-to-fp16",
                    test_l2_load_converts_fp32_to_fp16);
     qtest_add_func("/k230-kpu/l2-load-then-store-roundtrip",
