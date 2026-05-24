@@ -9,9 +9,13 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
+#include "qemu/main-loop.h"
+#include "exec/cpu-common.h"
 #include "migration/vmstate.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/misc/k230_sysctl.h"
+
+#define K230_SYSCTL_RTT_SAVE_SIZE (32 * 1024 * 1024)
 
 #define K230_SYSCTL_PLL_COUNT 4
 #define K230_SYSCTL_PLL_STRIDE 0x10
@@ -314,6 +318,26 @@ static uint64_t k230_sysctl_reset_read(void *opaque, hwaddr addr,
     return k230_sysctl_read_bytes(K230_SYSCTL_RESET(opaque)->regs, addr, size);
 }
 
+static void k230_sysctl_reset_restore_rtt(K230SysctlResetState *s)
+{
+    if (s->rtt_saved_valid) {
+        cpu_physical_memory_write(s->rtt_addr, s->rtt_saved, s->rtt_size);
+        g_free(s->rtt_saved);
+        s->rtt_saved = NULL;
+        s->rtt_saved_valid = false;
+        s->rtt_addr = 0;
+        s->rtt_size = 0;
+    }
+}
+
+static void k230_sysctl_reset_cancel_deferred_release(K230SysctlResetState *s)
+{
+    if (s->release_timer) {
+        timer_del(s->release_timer);
+    }
+    k230_sysctl_reset_restore_rtt(s);
+}
+
 static void k230_sysctl_reset_cpu1_async_work(CPUState *cpu,
                                               run_on_cpu_data data)
 {
@@ -322,24 +346,69 @@ static void k230_sysctl_reset_cpu1_async_work(CPUState *cpu,
     cpu_reset(cpu);
     cpu_set_pc(cpu, reset->rstvec);
     cpu->halted = 0;
+    qemu_cpu_kick(cpu);
     g_free(reset);
 }
 
-static void k230_sysctl_reset_release_cpu1(K230SysctlResetState *s)
+static void k230_sysctl_reset_release_cpu1_now(K230SysctlResetState *s)
 {
     K230SysctlCpu1Reset *reset;
-    uint64_t rstvec;
 
     if (!s->cpu1 || !s->boot) {
         return;
     }
 
-    rstvec = k230_sysctl_reg_read32(s->boot->regs, K230_SYSCTL_CPU1_RSTVEC);
-
     reset = g_new(K230SysctlCpu1Reset, 1);
-    reset->rstvec = rstvec;
+    reset->rstvec = k230_sysctl_reg_read32(s->boot->regs,
+                                           K230_SYSCTL_CPU1_RSTVEC);
     async_safe_run_on_cpu(s->cpu1, k230_sysctl_reset_cpu1_async_work,
                           RUN_ON_CPU_HOST_PTR(reset));
+}
+
+static void k230_sysctl_reset_release_cpu1_timer(void *opaque)
+{
+    K230SysctlResetState *s = opaque;
+
+    k230_sysctl_reset_restore_rtt(s);
+    k230_sysctl_reset_release_cpu1_now(s);
+}
+
+static void k230_sysctl_reset_defer_cpu1(K230SysctlResetState *s)
+{
+    void *zeros;
+
+    k230_sysctl_reset_cancel_deferred_release(s);
+
+    s->rtt_addr = k230_sysctl_reg_read32(s->boot->regs,
+                                         K230_SYSCTL_CPU1_RSTVEC);
+    s->rtt_size = K230_SYSCTL_RTT_SAVE_SIZE;
+    s->rtt_saved = g_malloc(s->rtt_size);
+    cpu_physical_memory_read(s->rtt_addr, s->rtt_saved, s->rtt_size);
+    zeros = g_malloc0(s->rtt_size);
+    cpu_physical_memory_write(s->rtt_addr, zeros, s->rtt_size);
+    g_free(zeros);
+    s->rtt_saved_valid = true;
+
+    /*
+     * Defer CPU1 release to give Linux time to boot before the big
+     * core starts executing.
+     */
+    timer_mod(s->release_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 15000);
+}
+
+static void k230_sysctl_reset_release_cpu1(K230SysctlResetState *s)
+{
+    if (!s->cpu1 || !s->boot) {
+        return;
+    }
+
+    if (s->defer_cpu1_release) {
+        k230_sysctl_reset_defer_cpu1(s);
+        return;
+    }
+
+    k230_sysctl_reset_release_cpu1_now(s);
 }
 
 static void k230_sysctl_reset_write_cpu1(K230SysctlResetState *s,
@@ -407,6 +476,7 @@ static void k230_sysctl_reset_reset(DeviceState *dev)
 {
     K230SysctlResetState *s = K230_SYSCTL_RESET(dev);
 
+    k230_sysctl_reset_cancel_deferred_release(s);
     memset(s->regs, 0, sizeof(s->regs));
     k230_sysctl_reg_write32(s->regs, K230_SYSCTL_CPU1_RST_CTL,
                             K230_SYSCTL_CPU1_RST_CTL_RESET);
@@ -426,6 +496,8 @@ static const Property k230_sysctl_reset_properties[] = {
                      TYPE_K230_SYSCTL_BOOT, K230SysctlBootState *),
     DEFINE_PROP_LINK("cpu1", K230SysctlResetState, cpu1, TYPE_CPU,
                      CPUState *),
+    DEFINE_PROP_BOOL("defer-cpu1-release", K230SysctlResetState,
+                     defer_cpu1_release, false),
 };
 
 static void k230_sysctl_reset_realize(DeviceState *dev, Error **errp)
@@ -435,6 +507,22 @@ static void k230_sysctl_reset_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->mmio, OBJECT(dev), &k230_sysctl_reset_ops, s,
                           TYPE_K230_SYSCTL_RESET, K230_SYSCTL_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
+
+    s->release_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                    k230_sysctl_reset_release_cpu1_timer, s);
+}
+
+static void k230_sysctl_reset_finalize(Object *obj)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(obj);
+
+    if (s->release_timer) {
+        timer_free(s->release_timer);
+        s->release_timer = NULL;
+    }
+    g_free(s->rtt_saved);
+    s->rtt_saved = NULL;
+    s->rtt_saved_valid = false;
 }
 
 static void k230_sysctl_reset_class_init(ObjectClass *oc, const void *data)
@@ -452,6 +540,7 @@ static const TypeInfo k230_sysctl_reset_type_info = {
     .name = TYPE_K230_SYSCTL_RESET,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(K230SysctlResetState),
+    .instance_finalize = k230_sysctl_reset_finalize,
     .class_init = k230_sysctl_reset_class_init,
 };
 

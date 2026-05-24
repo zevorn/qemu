@@ -122,6 +122,7 @@ typedef struct K230MachineState {
     K230SoCState soc;
     SiFiveTestState qemu_finisher;
     Notifier machine_done;
+    bool boot_both_cores;
 } K230MachineState;
 
 enum {
