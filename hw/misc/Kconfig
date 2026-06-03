@@ -250,6 +250,10 @@ config K230_IOMUX
 config K230_REGS
     bool
 
+config K230_I2S
+    bool
+    select REGISTER
+
 config K230_KPU
     bool
 
