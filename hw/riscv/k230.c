@@ -620,6 +620,8 @@ static void k230_soc_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(&s->pdma), 0, memmap[K230_DEV_DMA].base);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pdma), 0,
+                       k230_plic_irq(s, K230_PDMA_IRQ));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->ugzip), errp)) {
         return;
