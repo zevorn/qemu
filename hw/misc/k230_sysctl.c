@@ -9,7 +9,7 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
-#include "qemu/main-loop.h"
+#include "qemu/timer.h"
 #include "exec/cpu-common.h"
 #include "migration/vmstate.h"
 #include "hw/core/qdev-properties.h"
@@ -327,6 +327,7 @@ static void k230_sysctl_reset_restore_rtt(K230SysctlResetState *s)
         s->rtt_saved_valid = false;
         s->rtt_addr = 0;
         s->rtt_size = 0;
+        s->deferred_rstvec = 0;
     }
 }
 
@@ -337,6 +338,16 @@ static void k230_sysctl_reset_cancel_deferred_release(K230SysctlResetState *s)
     }
     k230_sysctl_reset_restore_rtt(s);
 }
+
+static bool k230_sysctl_reset_has_rtt_saved(void *opaque, int version_id)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(opaque);
+
+    return s->rtt_saved_valid;
+}
+
+
+
 
 static void k230_sysctl_reset_cpu1_async_work(CPUState *cpu,
                                               run_on_cpu_data data)
@@ -350,7 +361,25 @@ static void k230_sysctl_reset_cpu1_async_work(CPUState *cpu,
     g_free(reset);
 }
 
-static void k230_sysctl_reset_release_cpu1_now(K230SysctlResetState *s)
+static void k230_sysctl_reset_cpu1_hold_work(CPUState *cpu,
+                                             run_on_cpu_data data)
+{
+    cpu_reset(cpu);
+    cpu->halted = 1;
+    qemu_cpu_kick(cpu);
+}
+
+static void k230_sysctl_reset_assert_cpu1(K230SysctlResetState *s)
+{
+    if (!s->cpu1) {
+        return;
+    }
+    run_on_cpu(s->cpu1, k230_sysctl_reset_cpu1_hold_work, RUN_ON_CPU_NULL);
+}
+
+
+static void k230_sysctl_reset_release_cpu1_rstvec(K230SysctlResetState *s,
+                                                  uint32_t rstvec)
 {
     K230SysctlCpu1Reset *reset;
 
@@ -359,18 +388,31 @@ static void k230_sysctl_reset_release_cpu1_now(K230SysctlResetState *s)
     }
 
     reset = g_new(K230SysctlCpu1Reset, 1);
-    reset->rstvec = k230_sysctl_reg_read32(s->boot->regs,
-                                           K230_SYSCTL_CPU1_RSTVEC);
-    async_safe_run_on_cpu(s->cpu1, k230_sysctl_reset_cpu1_async_work,
-                          RUN_ON_CPU_HOST_PTR(reset));
+    reset->rstvec = rstvec;
+    s->last_cpu1_rstvec = reset->rstvec;
+    run_on_cpu(s->cpu1, k230_sysctl_reset_cpu1_async_work,
+               RUN_ON_CPU_HOST_PTR(reset));
+}
+
+static void k230_sysctl_reset_release_cpu1_now(K230SysctlResetState *s)
+{
+    uint32_t rstvec;
+
+    if (!s->cpu1 || !s->boot) {
+        return;
+    }
+
+    rstvec = k230_sysctl_reg_read32(s->boot->regs, K230_SYSCTL_CPU1_RSTVEC);
+    k230_sysctl_reset_release_cpu1_rstvec(s, rstvec);
 }
 
 static void k230_sysctl_reset_release_cpu1_timer(void *opaque)
 {
     K230SysctlResetState *s = opaque;
+    uint32_t rstvec = s->deferred_rstvec;
 
     k230_sysctl_reset_restore_rtt(s);
-    k230_sysctl_reset_release_cpu1_now(s);
+    k230_sysctl_reset_release_cpu1_rstvec(s, rstvec);
 }
 
 static void k230_sysctl_reset_defer_cpu1(K230SysctlResetState *s)
@@ -381,6 +423,7 @@ static void k230_sysctl_reset_defer_cpu1(K230SysctlResetState *s)
 
     s->rtt_addr = k230_sysctl_reg_read32(s->boot->regs,
                                          K230_SYSCTL_CPU1_RSTVEC);
+    s->deferred_rstvec = s->rtt_addr;
     s->rtt_size = K230_SYSCTL_RTT_SAVE_SIZE;
     s->rtt_saved = g_malloc(s->rtt_size);
     cpu_physical_memory_read(s->rtt_addr, s->rtt_saved, s->rtt_size);
@@ -435,6 +478,12 @@ static void k230_sysctl_reset_write_cpu1(K230SysctlResetState *s,
         }
     }
 
+    if (!(old & K230_SYSCTL_CPU1_RST_REQ) &&
+        (new & K230_SYSCTL_CPU1_RST_REQ)) {
+        k230_sysctl_reset_cancel_deferred_release(s);
+        k230_sysctl_reset_assert_cpu1(s);
+    }
+
     if ((old & K230_SYSCTL_CPU1_RST_REQ) &&
         !(new & K230_SYSCTL_CPU1_RST_REQ)) {
         k230_sysctl_reset_release_cpu1(s);
@@ -480,13 +529,28 @@ static void k230_sysctl_reset_reset(DeviceState *dev)
     memset(s->regs, 0, sizeof(s->regs));
     k230_sysctl_reg_write32(s->regs, K230_SYSCTL_CPU1_RST_CTL,
                             K230_SYSCTL_CPU1_RST_CTL_RESET);
+    s->last_cpu1_rstvec = 0;
+    s->deferred_rstvec = 0;
 }
 
 static const VMStateDescription vmstate_k230_sysctl_reset = {
     .name = TYPE_K230_SYSCTL_RESET,
-    .version_id = 1,
+    .version_id = 4,
+    .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(regs, K230SysctlResetState, K230_SYSCTL_SIZE),
+        VMSTATE_UINT32_V(last_cpu1_rstvec, K230SysctlResetState, 2),
+        VMSTATE_BOOL_V(rtt_saved_valid, K230SysctlResetState, 3),
+        VMSTATE_UINT64_TEST(rtt_addr, K230SysctlResetState,
+                            k230_sysctl_reset_has_rtt_saved),
+        VMSTATE_UINT32_TEST(rtt_size, K230SysctlResetState,
+                            k230_sysctl_reset_has_rtt_saved),
+        VMSTATE_VBUFFER_ALLOC_UINT32(rtt_saved, K230SysctlResetState, 3,
+                                     k230_sysctl_reset_has_rtt_saved,
+                                     rtt_size),
+        VMSTATE_TIMER_PTR_V(release_timer, K230SysctlResetState, 3),
+        VMSTATE_UINT32_TEST(deferred_rstvec, K230SysctlResetState,
+                            k230_sysctl_reset_has_rtt_saved),
         VMSTATE_END_OF_LIST(),
     },
 };
@@ -511,6 +575,16 @@ static void k230_sysctl_reset_realize(DeviceState *dev, Error **errp)
     s->release_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                     k230_sysctl_reset_release_cpu1_timer, s);
 }
+
+static void k230_sysctl_reset_init(Object *obj)
+{
+    K230SysctlResetState *s = K230_SYSCTL_RESET(obj);
+
+    object_property_add_uint32_ptr(obj, "last-cpu1-rstvec",
+                                   &s->last_cpu1_rstvec,
+                                   OBJ_PROP_FLAG_READ);
+}
+
 
 static void k230_sysctl_reset_finalize(Object *obj)
 {
@@ -540,6 +614,7 @@ static const TypeInfo k230_sysctl_reset_type_info = {
     .name = TYPE_K230_SYSCTL_RESET,
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(K230SysctlResetState),
+    .instance_init = k230_sysctl_reset_init,
     .instance_finalize = k230_sysctl_reset_finalize,
     .class_init = k230_sysctl_reset_class_init,
 };

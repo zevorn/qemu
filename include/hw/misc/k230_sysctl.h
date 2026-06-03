@@ -55,6 +55,8 @@ struct K230SysctlResetState {
     uint32_t rtt_size;
     bool rtt_saved_valid;
     bool defer_cpu1_release;
+    uint32_t last_cpu1_rstvec;
+    uint32_t deferred_rstvec;
 };
 
 #endif /* HW_MISC_K230_SYSCTL_H */
