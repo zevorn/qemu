@@ -226,6 +226,14 @@ config RK3588_GRF
 config RK3588_SCMI
     bool
 
+config RK3588_RKNPU
+    bool
+    select REGISTER
+
+config ROCKCHIP_IOMMU
+    bool
+    select REGISTER
+
 config SPACEMIT_K3_CTRL
     bool
 
