@@ -1,0 +1,472 @@
+.. SPDX-License-Identifier: GPL-2.0-or-later
+
+STM32G474 and ARDEP V2 machines
+===============================
+
+QEMU provides two lower-case machines based on the STM32G474VE:
+
+``stm32g474``
+    A generic STM32G474VE microcontroller machine.
+
+``ardep-v2``
+    The Mercedes-Benz ARDEP V2 board, built by composing the common
+    STM32G474VE model with the board clocks, LEDs, serial ports, and CAN
+    connections.
+
+The ARDEP machine composes the same common microcontroller device as the
+generic machine.  The memory map and peripheral implementations are not
+duplicated in the board model.
+
+Naming
+------
+
+The public machine names are English lower-case names.  The common C state is
+named ``STM32G474State`` and the implementation files are named
+``stm32g474.[ch]``; they do not use a ``Soc`` suffix.
+
+QEMU appends ``-machine`` to a machine's QOM type and removes that suffix when
+it presents the public machine name.  The common device type can therefore be
+named ``stm32g474`` while the generic machine type is
+``stm32g474-machine``.  The user selects that machine with
+``-machine stm32g474``.
+
+Sources
+-------
+
+The model is based on:
+
+* STM32G4 reference manual RM0440, revision 9.
+* STM32G474xB/xC/xE data sheet DS12288, revision 6.
+* ARDEP repository commit
+  ``266e0aa36e10b211ed83aa11ab410ac1f5de233e``.
+* Zephyr v4.4.0 commit
+  ``684c9e8f32e4373a21098559f748f06915f950c9``.
+
+Register behavior must be traced to one of these sources before it is added.
+Registers must not be implemented only to suppress a guest error or escape a
+firmware polling loop.
+
+Common STM32G474 model
+----------------------
+
+The common model contains the following architectural state:
+
+* Arm Cortex-M4F with DSP, FPU, MPU, SysTick, and bit-band support.
+* 102 external interrupt inputs and four implemented priority bits.
+* 512 KiB internal flash at ``0x08000000``.
+* A boot alias of the internal flash at ``0x00000000``.
+* 80 KiB SRAM1 at ``0x20000000``.
+* 16 KiB SRAM2 at ``0x20014000``.
+* 32 KiB CCM SRAM at ``0x10000000``, with an alias at ``0x20018000``.
+
+The CCM windows refer to the same memory backing.  They must not be represented
+by two independent RAM regions.
+
+The following peripheral blocks are implemented:
+
+* STM32G4 RCC clock and reset controller.
+* PWR and internal flash interface registers used during system setup.
+* USART1, USART2, and UART4.
+* GPIO ports A through G.
+* SYSCFG and the EXTI controller, with 42 valid lines numbered 0 through 43.
+* Three STM32 FDCAN channels and their shared message RAM, backed by a reusable
+  Bosch M_CAN message engine.
+* The STM32 USB FS device register block and packet memory area.
+
+The flash array is read-only after the image is loaded.  Flash program and
+erase operations are not implemented.  ADC, DAC, I2C, SPI, general-purpose
+timers, RNG, and LIN framing are also not implemented.  Their address ranges
+remain unmapped and follow QEMU's unassigned-access behavior.
+
+GPIO ports
+----------
+
+The common model provides GPIOA through GPIOG at ``0x48000000`` through
+``0x48001800``.  Their registers from ``MODER`` through ``BRR`` use
+``RegisterInfo`` and accept naturally aligned byte, halfword, and word
+accesses.  GPIOA, GPIOB, and GPIOC-G use their respective hardware reset
+images, and the complete ``LCKR`` sequence freezes selected configuration
+fields until a port or system reset.
+
+Each port exposes named ``pin-in`` and ``pin-out`` arrays.  ``pin-out`` is the
+resolved pad level derived from the output latch, mode, output type, pull
+configuration, and any external input.  A pin without an external driver or
+an enabled pull resolves deterministically low.  Alternate-function selection
+and output-speed registers retain their programmed values, but this model
+does not yet route alternate-function signals or model slew timing.
+
+Package pin bonding is not modeled.  Board LED wiring belongs to the ARDEP
+composition rather than the common GPIO device.  Register storage remains
+accessible while an RCC GPIO clock gate is disabled because the hardware
+manual does not specify a deterministic disabled-clock access result.
+
+System configuration controller
+-------------------------------
+
+The SYSCFG register block is at ``0x40010000``.  Its ten registers through
+``SKR`` use ``RegisterInfo`` and accept aligned 32-bit accesses.  The four
+``EXTICR`` registers route GPIOA through GPIOF on every external interrupt
+line and GPIOG on lines 0 through 10.  Invalid selectors preserve the prior
+field value.
+
+The common device exposes all 112 GPIO routing inputs through its ``gpio-in``
+array.  SYSCFG forwards the selected levels on 16 ``exti-out`` lines to EXTI.
+Changing a selector immediately updates the forwarded level; EXTI treats any
+resulting level transition as an ordinary edge.  Zephyr avoids a spurious
+pending bit by routing the GPIO before it enables the edge trigger and mask.
+
+The RCC ``SYSCFGEN`` gate supplies the SYSCFG PCLK2 clock, and
+``SYSCFGRST`` resets its ordinary configuration.  The CFGR2 lock bits and
+SWPR page locks survive this peripheral reset but clear on system reset.
+CCM erase, memory remapping, and the external effects of CFGR1 and the lock
+registers remain explicitly unimplemented.
+
+Extended interrupts and events
+------------------------------
+
+The EXTI register block is at ``0x40010400``.  Its 12 registers use
+``RegisterInfo`` and accept aligned 32-bit accesses.  The register backing
+includes the reserved gap at offsets ``0x18`` through ``0x1f``.  Bank 1 has
+configurable-line mask ``0xe07bffff``; bank 2 has mask ``0x00000303``.
+The all-valid-line masks are ``0xffffffff`` and ``0x00000f3f``.
+
+``IMR1`` and ``IMR2`` reset to ``0x1f840000`` and ``0x00000c3c`` so the
+direct wakeup lines start unmasked while configurable lines start masked.
+These values follow the per-register descriptions and the target line map;
+the conflicting aggregate reset table is not used.  Direct lines remain
+inert until their source peripheral and Stop-mode behavior are modeled.
+
+A selected external edge sets ``PR`` independently of ``IMR`` and ``EMR``.
+``IMR`` only controls delivery of the latched pending state to the NVIC, while
+``EMR`` independently enables an event pulse.  ``SWIER`` acts on a zero-to-one
+transition and likewise sets ``PR`` even when ``IMR`` is clear.  Enabling
+``IMR`` later therefore delivers an already pending interrupt; enabling
+``EMR`` does not retroactively pulse an event.  ``PR`` is write-one-to-clear
+and also clears the corresponding ``SWIER`` bit.  Each interrupt output
+remains asserted while ``PR & IMR`` is nonzero.
+
+EXTI lines 0 through 4 connect to NVIC inputs 6 through 10.  Lines 5 through
+9 share NVIC input 23, and lines 10 through 15 share NVIC input 40 through
+two OR gates.  EXTI shares the RCC ``SYSCFGEN`` clock with SYSCFG.
+``SYSCFGRST`` does not reset EXTI state; system reset does.
+
+Register modeling rule
+----------------------
+
+Every MMIO peripheral model added by this series must describe its register
+block with QEMU's ``RegisterInfo``, ``RegisterAccessInfo``, and
+``RegisterInfoArray`` framework and initialize it with
+``register_init_block32()``.  Register offsets and fields use the QEMU
+``REG32`` and ``FIELD`` macros.  Reset values, read-only bits,
+write-one-to-clear bits, and reserved masks belong in ``RegisterAccessInfo``
+rather than hand-written MMIO dispatch.
+
+Register offsets, fields, access tables, backing arrays, and register-local
+callbacks remain private to the corresponding device ``.c`` file.  Public
+headers expose only QOM types and constants needed to wire the common
+microcontroller and board models.
+
+Register callbacks implement only device behavior and side effects, such as
+clock propagation, IRQ updates, FIFO movement, DMA requests, and output
+changes.  New peripheral models must not dispatch register offsets through
+hand-written ``switch`` statements.  Non-register storage windows, including
+FDCAN message RAM and the internal flash array, remain ordinary
+``MemoryRegion`` backing where appropriate.
+
+Each peripheral qtest must cover representative reset values, access masks,
+and callback side effects in addition to its functional behavior.
+
+Clock and reset contract
+------------------------
+
+The STM32G474 reset clock is the 16 MHz HSI.  The common RCC model exposes the
+reset clock to the Cortex-M4 and implements clock source selection, prescalers,
+peripheral gates, and reset controls.
+
+The ARDEP V2 clock tree adds:
+
+* A 16 MHz bypassed HSE.
+* PLL M=4, N=85, R=2, producing a 170 MHz system clock.
+* A 48 MHz HSI48 clock.
+* A 32 kHz LSI clock.
+
+Firmware-visible ready and status bits follow their control bits.  This
+includes HSE ready, PLL ready, HSI48 ready, LSI ready, and the system clock
+switch status.  Clock outputs are recalculated and propagated when the guest
+changes a source or prescaler.
+
+The PWR and flash interface models preserve writable configuration and expose
+the voltage boost and flash latency state used by Zephyr at 170 MHz.  Reset
+restores all modeled registers, IRQ levels, GPIO levels, and derived clocks.
+
+Interrupt and serial contract
+-----------------------------
+
+Peripheral IRQs connect directly to the Cortex-M4 NVIC according to RM0440.
+Important assignments include:
+
+* RCC 5 and flash 4.
+* EXTI0 through EXTI4 on 6 through 10.
+* EXTI9_5 on 23 and EXTI15_10 on 40.
+* USART1 and USART2 on 37 and 38.
+* UART4 on 52.
+* FDCAN1 interrupt lines on 21 and 22.
+* FDCAN2 interrupt lines on 86 and 87.
+* FDCAN3 interrupt lines on 88 and 89.
+
+The USART model implements polling transmit and receive, interrupt-driven
+operation, baud-rate configuration, and the TEACK, REACK, TXE, TC, and RXNE
+state transitions used by Zephyr.  UART4 is ``serial0`` on both machines
+because it is the ARDEP application console.
+
+FDCAN
+-----
+
+The common device contains FDCAN1, FDCAN2, and FDCAN3 at ``0x40006400``,
+``0x40006800``, and ``0x40006c00``.  Their three slices share the 2544-byte
+message RAM at ``0x4000a400``.  The model implements:
+
+* Standard and extended filtering.
+* Receive FIFO 0 and FIFO 1.
+* Dedicated and FIFO/queue transmit buffers.
+* Classic CAN and CAN FD frames, including bit-rate switching.
+* Transmit events, cancellation, interrupt routing, monitor mode, and
+  internal and external loopback.
+* QEMU ``can-bus`` links and migration of active controller state.
+
+The controller does not simulate bit-level arbitration timing, physical ACK,
+error counters caused by bus faults, or transceiver electrical behavior.
+Frames accepted by a QEMU CAN bus complete without a physical acknowledgement.
+
+FDCAN1, FDCAN2, and FDCAN3 are exposed as the ``canbus0``, ``canbus1``, and
+``canbus2`` machine properties on ``stm32g474``.  ``ardep-v2`` exposes the
+first two properties.  The ARDEP devicetree calls FDCAN1 ``can_b`` and FDCAN2
+``can_a``; the QEMU property numbers continue to follow the hardware instance
+numbers.
+
+USB FS
+------
+
+The USB FS model implements the device controller registers, endpoint
+registers, packet memory, interrupt state, clock/reset inputs, and migration.
+It is hostless: it does not expose a USB device port and cannot exchange USB
+packets with a QEMU USB host.  Firmware can exercise controller setup, packet
+memory, and interrupt behavior, but USB bridge samples do not have an
+end-to-end backend.
+
+ARDEP V2 composition
+--------------------
+
+The implemented ``ardep-v2`` machine instantiates the common STM32G474 device.
+It can load firmware with:
+
+.. code-block:: shell
+
+   qemu-system-arm -M ardep-v2 -kernel firmware.bin
+
+The board supplies a physical, fixed 16 MHz HSE source.  Reset still selects
+HSI16; firmware must enable HSE bypass, configure the PLL, and select it as
+SYSCLK to reach 170 MHz.
+
+The implemented board connections are:
+
+* Active-low red LED on PC3.
+* Active-low green LED on PA3.
+
+The red and green LEDs have stable QOM paths ``/machine/red-led`` and
+``/machine/green-led``.  GPIO splitters preserve the same PA3 and PC3 signal
+paths to SYSCFG and EXTI.
+
+The common MCU provides the inherited serial order used by the board: UART-A
+is UART4 on PC10 and PC11 through ``serial0``; UART-B is USART2 on PD5 and PD6
+through ``serial1``; and LIN is USART1 on PE0 and PE1 through ``serial2``.
+Alternate-function pin multiplexing is not modeled as a separate electrical
+device.
+
+The board does not connect its two FDCAN controllers unless machine
+properties select the same QEMU CAN bus.  This makes disconnected, shared, and
+independent bus topologies explicit.
+
+For example, the following command connects both ARDEP CAN interfaces to one
+in-process bus:
+
+.. code-block:: shell
+
+   qemu-system-arm \
+       -object can-bus,id=can0 \
+       -M ardep-v2,canbus0=can0,canbus1=can0 \
+       -kernel zephyr.elf -nographic
+
+Add a SocketCAN host connector when host traffic is required:
+
+.. code-block:: shell
+
+   qemu-system-arm \
+       -object can-bus,id=can0 \
+       -object can-host-socketcan,id=host0,if=vcan0,canbus=can0 \
+       -M ardep-v2,canbus0=can0 \
+       -kernel zephyr.elf -nographic
+
+See :doc:`../devices/can` for host CAN setup.
+
+Boot paths
+----------
+
+Both machines reset from the flash alias at address zero.  Neither machine
+changes the Cortex-M4 initial VTOR merely because an ELF segment is loaded at
+a nonzero address.
+
+The generic direct boot flow uses an ELF or raw image linked at the internal
+flash base.  It validates the CPU, memory, clock, and console path without a
+bootloader.
+
+For example, run a directly linked Zephyr ELF on the generic machine with:
+
+.. code-block:: shell
+
+   qemu-system-arm -M stm32g474 -kernel zephyr.elf -nographic
+
+The same type of image can run with the ARDEP clocks and board connections:
+
+.. code-block:: shell
+
+   qemu-system-arm -M ardep-v2 -kernel zephyr.elf -nographic
+
+The default ARDEP application configuration enables MCUboot.  Its flash layout
+is:
+
+* MCUboot: offset ``0x00000``, size 96 KiB.
+* Slot 0: offset ``0x18000``, size 192 KiB.
+* Slot 1: offset ``0x48000``, size 192 KiB.
+* Storage: offset ``0x78000``, size 32 KiB.
+
+The slot-0 application vector is at ``0x08018200`` after its 0x200-byte MCUboot
+header.  Acceptance of an unchanged ARDEP boot layout therefore uses a real
+MCUboot plus application image.  A direct-linked bring-up image may be used as
+diagnostic evidence, but it does not replace the MCUboot acceptance run.
+
+The ``ardep-v2`` loader follows the same contract: raw images load at
+``0x08000000`` and are limited to 512 KiB, while ELF segments retain their
+linked addresses.  The machine does not relocate a slot-only image or
+synthesize an MCUboot jump.
+
+Builds that merge MCUboot and the application into one 512 KiB raw flash image
+can therefore use the same loader:
+
+.. code-block:: shell
+
+   qemu-system-arm -M ardep-v2 \
+       -kernel ardep-v2-mcuboot-application.bin -nographic
+
+Sample acceptance
+-----------------
+
+The following pinned inputs have been run on this model:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Input
+     - Verified behavior
+   * - Zephyr ``hello_world``
+     - Direct boot, clock setup, UART4 console, and the Zephyr banner on
+       ``stm32g474``.
+   * - ARDEP ``led``
+     - Direct boot and MCUboot slot-0 boot, with alternating red and green
+       board LED levels.
+   * - ARDEP ``uart``
+     - Interactive UART4 receive/transmit; inputs 3 and 4 produce 9 and 16.
+   * - ARDEP ``gearshift``
+     - External PC13, PC1, and PF1 levels produce positions 0, 1, 3, and 7.
+   * - ARDEP ``digital_input_interrupt``
+     - Both PD10 edges reach EXTI and the callback mirrors the level on PD11.
+   * - ARDEP ``can``
+     - Repeated classic CAN and 64-byte CAN FD traffic between the two board
+       controllers on a shared QEMU CAN bus.
+   * - ARDEP ``gpio_expander``
+     - CAN configuration and write requests update PA1 and appear in the CAN
+       state response.
+   * - ARDEP ``iso14229``
+     - A diagnostic-session request is received and a positive CAN response is
+       transmitted.
+
+The ARDEP sample builds use pinned source without source changes.  Direct-boot
+acceptance disables MCUboot and the devicetree code partition; isolated CAN
+tests also disable the board's unrelated default UDS, CAN logger, and USB
+features so only the sample owns its CAN controller.  The MCUboot acceptance
+run instead uses the default three-domain build and unchanged flash layout.
+
+The ADC and DAC samples require unmodeled analog converters.  LIN and
+LIN-to-CAN samples require LIN break and framing behavior beyond the modeled
+UART path.
+Power-I/O shield, HV shield, hardware-test, and hardware-tester samples require
+unmodeled I2C, SPI, analog, or external-board behavior.  UDS update samples
+require flash program and erase support.  These are not reported as successful
+runs merely because they can be built.
+
+Functional test assets
+----------------------
+
+The release-backed Zephyr tests use SHA-256-pinned binaries from
+`stm32g474-ardep-v2-zephyr-qemu1
+<https://github.com/processmission/qemu/releases/tag/stm32g474-ardep-v2-zephyr-qemu1>`_.
+The release contains:
+
+* a direct Zephyr ``hello_world`` image used by both machines;
+* the interactive ARDEP UART sample;
+* a complete 512 KiB MCUboot, firmware-loader, and LED-application flash
+  image;
+* a ``SHA256SUMS`` manifest and the exact source revisions.
+
+The source tree does not contain those compiled binaries.  Run the thorough
+test with:
+
+.. code-block:: shell
+
+   make check-functional-arm
+
+Device behavior and errors
+--------------------------
+
+Reserved register bits read as specified by RM0440 and ignore writes unless the
+manual defines another behavior.  Unsupported guest operations produce a
+targeted ``LOG_GUEST_ERROR`` message where that helps diagnose firmware, but
+normal Zephyr initialization must not depend on log suppression.
+
+Stateful devices keep enough state to reproduce reset, IRQ, clock, and output
+behavior.  Migration is not claimed until the corresponding VMState and a
+migration test exist.  Host I/O failure must be reported through the owning
+QEMU backend without changing guest-visible register semantics.
+
+Verification
+------------
+
+Each feature is accompanied by the narrowest useful qtest.  The complete
+verification set includes:
+
+* Machine creation for both ``stm32g474`` and ``ardep-v2``.
+* Flash, flash alias, SRAM, and CCM alias read/write tests.
+* Reset-vector and repeated-reset tests.
+* RCC reset values, ready transitions, PLL configuration, clock switching,
+  peripheral gates, reset controls, and RCC IRQ tests.
+* PWR and flash latency read/write and reset tests.
+* UART4 polling TX/RX and IRQ tests.
+* GPIO output, input, active-low LED, SYSCFG routing, EXTI pending, and grouped
+  IRQ tests.
+* FDCAN register, message RAM, filtering, classic CAN, CAN FD, loopback, bus,
+  and IRQ tests.
+* USB FS registers, packet memory, IRQ, clock, reset, and migration tests.
+* Register reset values, access masks, and behavior callbacks for every new
+  peripheral register block.
+* Self-contained functional tests for raw flash boot, UART4 output, and QMP
+  system reset on both machines.
+* Release-backed functional tests for direct Zephyr boot on both machines,
+  ARDEP UART input/output, and MCUboot chainload into the ARDEP LED sample.
+* Timed Zephyr and ARDEP boot runs with positive success markers and negative
+  failure markers.
+
+All QEMU binaries used for acceptance are built from the feature branch in a
+named ``builds/`` directory.  Local logs and firmware builds remain under
+``.oh-my-qemu/``.  Compiled functional assets are published as release
+attachments and pinned by SHA-256 rather than committed as source.

@@ -1132,6 +1132,45 @@ F: hw/gpio/stm32l4x5_gpio.c
 F: include/hw/*/stm32l4x5_*.h
 F: tests/qtest/stm32l4x5*
 
+STM32G474
+M: Chao Liu <chao.liu@processmission.com>
+S: Maintained
+F: docs/system/arm/stm32g474.rst
+F: hw/arm/ardep-v2.c
+F: hw/arm/stm32g474*.c
+F: hw/char/stm32g474_usart.c
+F: hw/gpio/stm32g474_gpio.c
+F: hw/misc/stm32g474_exti.c
+F: hw/misc/stm32g474_flash.c
+F: hw/misc/stm32g474_pwr.c
+F: hw/misc/stm32g474_rcc.c
+F: hw/misc/stm32g474_syscfg.c
+F: hw/net/can/stm32g474_fdcan.c
+F: hw/usb/stm32g474_usbfs.c
+F: include/hw/arm/stm32g474.h
+F: include/hw/char/stm32g474_usart.h
+F: include/hw/gpio/stm32g474_gpio.h
+F: include/hw/misc/stm32g474_exti.h
+F: include/hw/misc/stm32g474_flash.h
+F: include/hw/misc/stm32g474_pwr.h
+F: include/hw/misc/stm32g474_rcc.h
+F: include/hw/misc/stm32g474_syscfg.h
+F: include/hw/net/stm32g474_fdcan.h
+F: include/hw/usb/stm32g474_usbfs.h
+F: tests/functional/arm/test_stm32g474*.py
+F: tests/qtest/ardep-v2-test.c
+F: tests/qtest/stm32g474-exti-test.c
+F: tests/qtest/stm32g474-fdcan-test.c
+F: tests/qtest/stm32g474-fdcan-traffic-test.c
+F: tests/qtest/stm32g474-flash-test.c
+F: tests/qtest/stm32g474-gpio-test.c
+F: tests/qtest/stm32g474-pwr-test.c
+F: tests/qtest/stm32g474-rcc-test.c
+F: tests/qtest/stm32g474-syscfg-test.c
+F: tests/qtest/stm32g474-test.c
+F: tests/qtest/stm32g474-usart-test.c
+F: tests/qtest/stm32g474-usbfs-test.c
+
 STM32VLDISCOVERY
 M: Alexandre Iooss <erdnaxe@crans.org>
 L: qemu-arm@nongnu.org
@@ -3069,8 +3108,10 @@ S: Maintained
 W: https://canbus.pages.fel.cvut.cz/
 F: net/can/*
 F: hw/net/can/*
+F: include/hw/net/m_can.h
 F: include/net/can_*.h
 F: docs/system/devices/can.rst
+F: tests/unit/test-m-can.c
 
 OpenPIC interrupt controller
 M: Mark Cave-Ayland <mark.cave-ayland@ilande.co.uk>

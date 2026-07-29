@@ -135,6 +135,26 @@ config STM32L4X5_SYSCFG
 config STM32L4X5_RCC
     bool
 
+config STM32G474_RCC
+    bool
+    select REGISTER
+
+config STM32G474_EXTI
+    bool
+    select REGISTER
+
+config STM32G474_SYSCFG
+    bool
+    select REGISTER
+
+config STM32G474_FLASH
+    bool
+    select REGISTER
+
+config STM32G474_PWR
+    bool
+    select REGISTER
+
 config MIPS_ITU
     bool
     depends on TCG

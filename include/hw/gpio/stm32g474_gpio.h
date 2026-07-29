@@ -1,0 +1,33 @@
+/*
+ * STM32G474 general-purpose I/O ports
+ *
+ * Copyright (c) 2026 Process Mission
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef HW_GPIO_STM32G474_GPIO_H
+#define HW_GPIO_STM32G474_GPIO_H
+
+#include "qom/object.h"
+
+#define TYPE_STM32G474_GPIO "stm32g474-gpio"
+#define TYPE_STM32G474_GPIO_A "stm32g474-gpio-a"
+#define TYPE_STM32G474_GPIO_B "stm32g474-gpio-b"
+#define TYPE_STM32G474_GPIO_CG "stm32g474-gpio-cg"
+OBJECT_DECLARE_TYPE(Stm32g474GpioState, Stm32g474GpioClass,
+                    STM32G474_GPIO)
+
+#define STM32G474_GPIO_NUM_PORTS 7
+#define STM32G474_GPIO_NUM_PINS 16
+#define STM32G474_GPIO_MMIO_SIZE 0x400
+
+#define STM32G474_GPIOA_BASE 0x48000000
+#define STM32G474_GPIOB_BASE 0x48000400
+#define STM32G474_GPIOC_BASE 0x48000800
+#define STM32G474_GPIOD_BASE 0x48000c00
+#define STM32G474_GPIOE_BASE 0x48001000
+#define STM32G474_GPIOF_BASE 0x48001400
+#define STM32G474_GPIOG_BASE 0x48001800
+
+#endif
