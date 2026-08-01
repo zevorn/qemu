@@ -11,7 +11,8 @@ backend, so all guest targets remain available while the packages avoid host
 SDL runtime compatibility problems.
 
 The packages include the QEMU firmware and data files, required non-system
-runtime libraries, and the ``COPYING``, ``COPYING.LIB``, and ``LICENSE`` files.
+runtime libraries, the ``COPYING``, ``COPYING.LIB``, and ``LICENSE`` files, and
+the corresponding third-party notices in the ``licenses`` directory.
 
 Release tags
 ------------
@@ -31,6 +32,14 @@ tag builds and publishes the following host packages:
 The corresponding Actions run retains the same archives as workflow artifacts
 for fourteen days.  Release archives remain downloadable from the GitHub
 Release and are accompanied by a ``SHA256SUMS`` file.
+
+Compatibility
+-------------
+
+Linux packages are built on CentOS Stream 9 and require glibc 2.34 or newer.
+The macOS Intel package is built and checked for macOS 15.0, while the Apple
+Silicon package is built and checked for macOS 14.0.  The deployment check
+applies to QEMU and every bundled dynamic library.
 
 Using a package
 ---------------
