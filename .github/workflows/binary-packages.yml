@@ -58,11 +58,11 @@ jobs:
           podman run --pull newer --init --rm -i \
               -e PACKAGE_VERSION \
               -v "$(pwd):$(pwd)" -w "$(pwd)" \
-              docker.io/pboqemu/qemu-ci:debian \
+              docker.io/pboqemu/qemu-ci:centos9 \
               bash -exc '
-                  apt-get update
-                  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                      --no-install-recommends patchelf
+                  dnf install -y patchelf
+                  glibc_version=$(ldd --version | awk "NR == 1 { print \$NF }")
+                  test "$glibc_version" = 2.34
                   ./configure --disable-werror --disable-docs --disable-sdl \
                       --prefix="$PWD/package-root"
                   ninja -C build install
@@ -135,9 +135,13 @@ jobs:
         include:
           - arch: x86_64
             image: macos-15-intel
+            deployment_target: '15.0'
           - arch: aarch64
-            image: macos-26
+            image: macos-14
+            deployment_target: '14.0'
     runs-on: ${{ matrix.image }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
     steps:
       - uses: actions/checkout@v6
       - run: brew uninstall cmake
@@ -159,7 +163,8 @@ jobs:
           ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD" \
               --prefix "$PWD/package-root" --output-dir "$PWD/artifacts" \
               --platform macos --host-arch "${{ matrix.arch }}" \
-              --version "$PACKAGE_VERSION"
+              --version "$PACKAGE_VERSION" \
+              --macos-min-version "${{ matrix.deployment_target }}"
       - name: Verify packaged QEMU startup
         run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-macos-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
       - uses: actions/upload-artifact@v5
