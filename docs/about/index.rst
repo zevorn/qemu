@@ -23,6 +23,7 @@ allows you to create, convert and modify disk images.
    :maxdepth: 2
 
    build-platforms
+   downloads
    emulation
    deprecated
    removed-features
