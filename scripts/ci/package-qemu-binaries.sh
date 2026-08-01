@@ -185,7 +185,7 @@ copy_windows_license()
         ;;
     esac
     notices=$(pacman -Qql "$package" |
-        awk '$2 ~ /\/share\/(doc|licenses)\// { print $2 }')
+        awk '$1 ~ /\/share\/(doc|licenses)\// { print $1 }')
     found=0
     while IFS= read -r notice; do
         [ -f "$notice" ] || continue
