@@ -40,47 +40,6 @@ jobs:
               exit 1
           fi
 
-  package-linux:
-    needs: validate-release-tag
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            image: ubuntu-24.04
-          - arch: aarch64
-            image: ubuntu-24.04-arm
-    runs-on: ${{ matrix.image }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build and package all QEMU targets
-        run: |
-          podman run --pull newer --init --rm -i \
-              -e PACKAGE_VERSION \
-              -v "$(pwd):$(pwd)" -w "$(pwd)" \
-              docker.io/pboqemu/qemu-ci:centos9 \
-              bash -exc '
-                  dnf install -y patchelf
-                  glibc_version=$(ldd --version | awk "NR == 1 { print \$NF }")
-                  test "$glibc_version" = 2.34
-                  ./configure --disable-werror --disable-docs --disable-sdl \
-                      --prefix="$PWD/package-root"
-                  ninja -C build install
-                  ./scripts/ci/package-qemu-binaries.sh \
-                      --source-dir "$PWD" --prefix "$PWD/package-root" \
-                      --output-dir "$PWD/artifacts" --platform linux \
-                      --host-arch "${{ matrix.arch }}" \
-                      --version "$PACKAGE_VERSION"
-              '
-      - name: Verify packaged QEMU startup
-        run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-linux-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
-      - uses: actions/upload-artifact@v5
-        with:
-          name: qemu-linux-${{ matrix.arch }}
-          path: artifacts/*.tar.gz
-          if-no-files-found: error
-          retention-days: 14
-
   package-windows:
     needs: validate-release-tag
     runs-on: windows-2025
@@ -127,59 +86,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  package-macos:
-    needs: validate-release-tag
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            image: macos-15-intel
-            deployment_target: '15.0'
-          - arch: aarch64
-            image: macos-14
-            deployment_target: '14.0'
-    runs-on: ${{ matrix.image }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
-    steps:
-      - uses: actions/checkout@v6
-      - run: brew uninstall cmake
-      - name: Install build and packaging dependencies
-        run: |
-          # shellcheck disable=SC2046
-          brew install --quiet \
-              $(env HOMEBREW_NO_ENV_HINTS=1 brew deps --include-build qemu) \
-              bison dylibbundler flex
-      - run: |
-          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
-          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
-      - name: Build and package all QEMU targets
-        run: |
-          set -e
-          ./configure --disable-werror --disable-docs --disable-sdl \
-              --prefix="$PWD/package-root"
-          ninja -C build install
-          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD" \
-              --prefix "$PWD/package-root" --output-dir "$PWD/artifacts" \
-              --platform macos --host-arch "${{ matrix.arch }}" \
-              --version "$PACKAGE_VERSION" \
-              --macos-min-version "${{ matrix.deployment_target }}"
-      - name: Verify packaged QEMU startup
-        run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-macos-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
-      - uses: actions/upload-artifact@v5
-        with:
-          name: qemu-macos-${{ matrix.arch }}
-          path: artifacts/*.tar.gz
-          if-no-files-found: error
-          retention-days: 14
-
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs:
-      - package-linux
       - package-windows
-      - package-macos
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -199,6 +109,6 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           shopt -s nullglob
-          assets=(release-artifacts/*.tar.gz release-artifacts/*.zip SHA256SUMS)
+          assets=(release-artifacts/*.zip SHA256SUMS)
           gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
               --title "QEMU $RELEASE_TAG" "${assets[@]}"
