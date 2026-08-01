@@ -117,7 +117,8 @@ find_executables()
 {
     local executable_dir
 
-    for executable_dir in "$bundle_dir/bin" "$bundle_dir/sbin"; do
+    for executable_dir in "$bundle_dir/bin" "$bundle_dir/sbin" \
+                          "$bundle_dir/libexec"; do
         [ -d "$executable_dir" ] || continue
         find "$executable_dir" -type f -perm -u+x -print0
     done
@@ -173,20 +174,28 @@ bundle_linux_libraries()
 
 bundle_windows_libraries()
 {
-    local executable library
+    local executable executable_dir library
 
     while IFS= read -r -d '' executable; do
+        case "$executable" in
+        *.exe)
+            ;;
+        *)
+            continue
+            ;;
+        esac
+
+        executable_dir=$(dirname "$executable")
         ldd "$executable" |
-            awk '$2 == "=>" && $3 ~ /^\// { print $3 }'
-    done < <(find "$bundle_dir/bin" -type f -name '*.exe' -print0) |
-        LC_ALL=C sort -u |
+            awk '$2 == "=>" && $3 ~ /^\// { print $3 }' |
         while IFS= read -r library; do
             case "$library" in
             /clang64/bin/*.dll|/mingw64/bin/*.dll|/ucrt64/bin/*.dll)
-                cp -L "$library" "$bundle_dir/bin/"
+                cp -L "$library" "$executable_dir/"
                 ;;
             esac
         done
+    done < <(find_executables)
 }
 
 deduplicate_macos_rpaths()
