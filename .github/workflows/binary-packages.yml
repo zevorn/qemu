@@ -1,0 +1,194 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: QEMU binary packages
+
+on:
+  pull_request:
+    branches:
+      - devel
+    paths:
+      - .github/workflows/binary-packages.yml
+      - scripts/ci/package-qemu-binaries.sh
+      - docs/about/downloads.rst
+      - docs/about/index.rst
+  push:
+    tags:
+      - '*-process-mission-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PACKAGE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('snapshot-{0}', github.sha) }}
+
+jobs:
+  validate-release-tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate downstream release tag
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z._-]*-process-mission-[0-9]{8}$ ]]; then
+              echo "::error::Expected vX.Y.Z-process-mission-YYYYMMDD tag"
+              exit 1
+          fi
+
+  package-linux:
+    needs: validate-release-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: ubuntu-24.04
+          - arch: aarch64
+            image: ubuntu-24.04-arm
+    runs-on: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and package all QEMU targets
+        run: |
+          podman run --pull newer --init --rm -i \
+              -e PACKAGE_VERSION \
+              -v "$(pwd):$(pwd)" -w "$(pwd)" \
+              docker.io/pboqemu/qemu-ci:debian \
+              bash -exc '
+                  apt-get update
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                      --no-install-recommends patchelf
+                  ./configure --disable-werror --disable-docs --disable-sdl \
+                      --prefix="$PWD/package-root"
+                  ninja -C build install
+                  ./scripts/ci/package-qemu-binaries.sh \
+                      --source-dir "$PWD" --prefix "$PWD/package-root" \
+                      --output-dir "$PWD/artifacts" --platform linux \
+                      --host-arch "${{ matrix.arch }}" \
+                      --version "$PACKAGE_VERSION"
+              '
+      - name: Verify packaged QEMU startup
+        run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-linux-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
+      - uses: actions/upload-artifact@v5
+        with:
+          name: qemu-linux-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-windows:
+    needs: validate-release-tag
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: MINGW64
+      - uses: actions/checkout@v6
+      - name: Install build and packaging dependencies
+        run: >
+          pacman -S --noconfirm base-devel binutils bison curl diffutils flex
+          git grep make sed zip ${MINGW_PACKAGE_PREFIX}-toolchain
+          ${MINGW_PACKAGE_PREFIX}-glib2 ${MINGW_PACKAGE_PREFIX}-gtk3
+          ${MINGW_PACKAGE_PREFIX}-libnfs ${MINGW_PACKAGE_PREFIX}-libssh
+          ${MINGW_PACKAGE_PREFIX}-ninja ${MINGW_PACKAGE_PREFIX}-pixman
+          ${MINGW_PACKAGE_PREFIX}-pkgconf ${MINGW_PACKAGE_PREFIX}-python
+          ${MINGW_PACKAGE_PREFIX}-SDL2 ${MINGW_PACKAGE_PREFIX}-zstd
+      - name: Install remaining QEMU dependencies
+        run: >
+          git clone https://github.com/msys2/MINGW-packages --depth=1 &&
+          pushd ./MINGW-packages/mingw-w64-qemu &&
+          (makepkg --syncdeps --nobuild --noprepare --noconfirm --skippgpcheck
+          PKGBUILD || true) && popd
+      - name: Build and package all QEMU targets
+        run: >
+          ./configure --disable-werror --disable-docs --disable-sdl \
+          --prefix="$PWD/package-root" &&
+          ninja -C build install &&
+          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD"
+          --prefix "$PWD/package-root" --output-dir "$PWD/artifacts"
+          --platform windows --host-arch x86_64 --version "$PACKAGE_VERSION"
+      - name: Verify packaged QEMU startup
+        run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-windows-x86_64/bin/qemu-system-x86_64.exe -version
+      - uses: actions/upload-artifact@v5
+        with:
+          name: qemu-windows-x86_64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  package-macos:
+    needs: validate-release-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            image: macos-15-intel
+          - arch: aarch64
+            image: macos-26
+    runs-on: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: brew uninstall cmake
+      - name: Install build and packaging dependencies
+        run: |
+          # shellcheck disable=SC2046
+          brew install --quiet \
+              $(env HOMEBREW_NO_ENV_HINTS=1 brew deps --include-build qemu) \
+              bison dylibbundler flex
+      - run: |
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+      - name: Build and package all QEMU targets
+        run: >
+          ./configure --disable-werror --disable-docs --disable-sdl \
+          --prefix="$PWD/package-root" &&
+          ninja -C build install &&
+          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD"
+          --prefix "$PWD/package-root" --output-dir "$PWD/artifacts"
+          --platform macos --host-arch "${{ matrix.arch }}"
+          --version "$PACKAGE_VERSION"
+      - name: Verify packaged QEMU startup
+        run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-macos-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
+      - uses: actions/upload-artifact@v5
+        with:
+          name: qemu-macos-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs:
+      - package-linux
+      - package-windows
+      - package-macos
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: Generate release checksums
+        run: |
+          cd release-artifacts
+          find . -maxdepth 1 -type f -print | LC_ALL=C sort | xargs sha256sum \
+              > ../SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes
+          --title "QEMU $RELEASE_TAG" release-artifacts/* SHA256SUMS
