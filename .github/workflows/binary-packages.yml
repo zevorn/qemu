@@ -77,7 +77,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: qemu-linux-${{ matrix.arch }}
-          path: artifacts/*
+          path: artifacts/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -109,19 +109,21 @@ jobs:
           (makepkg --syncdeps --nobuild --noprepare --noconfirm --skippgpcheck
           PKGBUILD || true) && popd
       - name: Build and package all QEMU targets
-        run: >
+        run: |
+          set -e
           ./configure --disable-werror --disable-docs --disable-sdl \
-          --prefix="$PWD/package-root" &&
-          ninja -C build install &&
-          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD"
-          --prefix "$PWD/package-root" --output-dir "$PWD/artifacts"
-          --platform windows --host-arch x86_64 --version "$PACKAGE_VERSION"
+              --prefix="$PWD/package-root"
+          ninja -C build install
+          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD" \
+              --prefix "$PWD/package-root" --output-dir "$PWD/artifacts" \
+              --platform windows --host-arch x86_64 \
+              --version "$PACKAGE_VERSION"
       - name: Verify packaged QEMU startup
         run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-windows-x86_64/bin/qemu-system-x86_64.exe -version
       - uses: actions/upload-artifact@v5
         with:
           name: qemu-windows-x86_64
-          path: artifacts/*
+          path: artifacts/*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -149,20 +151,21 @@ jobs:
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
       - name: Build and package all QEMU targets
-        run: >
+        run: |
+          set -e
           ./configure --disable-werror --disable-docs --disable-sdl \
-          --prefix="$PWD/package-root" &&
-          ninja -C build install &&
-          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD"
-          --prefix "$PWD/package-root" --output-dir "$PWD/artifacts"
-          --platform macos --host-arch "${{ matrix.arch }}"
-          --version "$PACKAGE_VERSION"
+              --prefix="$PWD/package-root"
+          ninja -C build install
+          ./scripts/ci/package-qemu-binaries.sh --source-dir "$PWD" \
+              --prefix "$PWD/package-root" --output-dir "$PWD/artifacts" \
+              --platform macos --host-arch "${{ matrix.arch }}" \
+              --version "$PACKAGE_VERSION"
       - name: Verify packaged QEMU startup
         run: artifacts/qemu-${{ env.PACKAGE_VERSION }}-macos-${{ matrix.arch }}/bin/qemu-system-x86_64 -version
       - uses: actions/upload-artifact@v5
         with:
           name: qemu-macos-${{ matrix.arch }}
-          path: artifacts/*
+          path: artifacts/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -189,6 +192,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: >
-          gh release create "$RELEASE_TAG" --verify-tag --generate-notes
-          --title "QEMU $RELEASE_TAG" release-artifacts/* SHA256SUMS
+        run: |
+          shopt -s nullglob
+          assets=(release-artifacts/*.tar.gz release-artifacts/*.zip SHA256SUMS)
+          gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
+              --title "QEMU $RELEASE_TAG" "${assets[@]}"
