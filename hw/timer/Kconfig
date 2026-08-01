@@ -66,5 +66,13 @@ config SSE_TIMER
 config STELLARIS_GPTM
     bool
 
+config STC32G_TIMER
+    bool
+    select REGISTER
+
+config STC8G_PCA
+    bool
+    select REGISTER
+
 config AVR_TIMER16
     bool

@@ -1,5 +1,13 @@
 # See docs/devel/tracing.rst for syntax documentation.
 
+# stc8g_mdu.c
+stc8g_mdu_start(unsigned mode, uint32_t operand, uint16_t divisor, uint64_t delay_ns) "mode=%u operand=0x%08x divisor=0x%04x delay=%" PRIu64 "ns"
+stc8g_mdu_complete(unsigned mode, uint32_t result, uint16_t remainder) "mode=%u result=0x%08x remainder=0x%04x"
+stc8g_mdu_reset(void) ""
+
+# stc8g_lvd.c
+stc8g_lvd_event(uint16_t voltage, uint16_t threshold, bool reset) "voltage %umV threshold %umV reset %u"
+
 # k230_dewarp.c
 k230_dewarp_read(uint64_t offset, uint64_t data, unsigned size) "offset 0x%" PRIx64 " data 0x%" PRIx64 " size %u"
 k230_dewarp_write(uint64_t offset, uint64_t data, unsigned size) "offset 0x%" PRIx64 " data 0x%" PRIx64 " size %u"
@@ -501,6 +509,9 @@ ivshmem_flat_interrupt_peer(uint16_t peer_id, uint16_t vector_id) "Interrupting 
 i2c_echo_event(const char *id, const char *event) "%s: %s"
 i2c_echo_recv(const char *id, uint8_t data) "%s: recv 0x%02" PRIx8
 i2c_echo_send(const char *id, uint8_t data) "%s: send 0x%02" PRIx8
+
+# stc8g_sysctrl.c
+stc8g_sysctrl_clock(uint64_t sysclk, uint64_t mclko, unsigned source, unsigned divider) "sysclk=%" PRIu64 "Hz mclko=%" PRIu64 "Hz source=%u divider=%u"
 
 # iommu-testdev.c
 iommu_testdev_mmio_read(uint64_t addr, uint64_t value, unsigned size) "addr=0x%" PRIx64 " value=0x%" PRIx64 " size=%u"

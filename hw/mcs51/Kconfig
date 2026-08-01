@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Process Mission
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# MCS-51 family SoCs and machines
+
+config STC8G1K08A
+    bool
+    default y
+    depends on MCS51 && !MCS251
+    select STC8G_ADC
+    select STC8G_GPIO
+    select STC8G_I2C
+    select STC8G_INTC
+    select STC8G_IAP
+    select STC8G_LVD
+    select STC8G_MDU
+    select STC8G_PCA
+    select STC8G_SPI
+    select STC8G_SYSCTRL
+    select STC8G_WDT
+    select STC32G_TIMER
+    select STC8G_UART
+
+config STC32G144K246
+    bool
+    default y
+    depends on MCS251
+    select STC32G_GPIO
+    select STC32G_TIMER
+    select STC32G_UART
+    select STC32G_DSP
+    select STC32G_TFPU
+
+config STC32G_DSP
+    bool
+    depends on MCS251
+    select REGISTER
+
+config STC32G_TFPU
+    bool
+    depends on MCS251
+    select REGISTER
