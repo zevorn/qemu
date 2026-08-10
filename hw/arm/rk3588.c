@@ -1,7 +1,7 @@
 /*
  * Local-only Rockchip RK3588 board machine models
  *
- * Copyright (c) 2026 Chao Liu
+ * Copyright (c) 2026 Process Mission
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -46,6 +46,7 @@
 #include "hw/sd/sd.h"
 #include "hw/sd/sdhci.h"
 #include "hw/timer/rockchip_stimer.h"
+#include "hw/usb/rk3588_dwc3_udc.h"
 #include "hw/usb/rk3588_usb2_host.h"
 #include "net/net.h"
 #include "system/block-backend.h"
@@ -75,8 +76,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(RK3588MachineState, RK3588_MACHINE)
 #define RK3588_NUM_SPI_IRQS 512
 #define RK3588_GTIMER_HZ 24000000
 #define RK3588_UART_BAUDBASE 1500000
-#define RK3588_MAX_RAM_SIZE (rk3588_memmap[RK3588_GIC_DIST].base - \
-                             rk3588_memmap[RK3588_RAM].base)
+#define RK3588_DEFAULT_RAM_BASE 0x00200000ULL
+#define RK3588_ZEPHYR_RAM_BASE 0x10000000ULL
 #define RK3588_SRAM_SIZE MiB
 #define RK3588_IRAM_SIZE 0x00ff0000
 #define RK3588_ATAGS_SIZE (8 * KiB)
@@ -205,6 +206,7 @@ struct RK3588MachineState {
     DeviceState *secure_otp;
     DeviceState *atf_ddr;
     RK3588DDRState *ddr;
+    RK3588DWC3UDCState *dwc3_udc;
     RK3588USB2HostState *usb2_host;
 
     MemoryRegion sram;
@@ -221,6 +223,7 @@ struct RK3588MachineState {
     bool firmware_atf_entered;
     bool zvm_ram;
     bool rknpu;
+    bool zephyr_ram;
     RK3588BootROM bootrom_state;
 };
 
@@ -252,6 +255,7 @@ enum {
     RK3588_RAM,
     RK3588_FIRMWARE_SCRATCH,
     RK3588_SCMI_SHMEM,
+    RK3588_USB3OTG0,
     RK3588_PMU0_GRF,
     RK3588_PMU1_GRF,
     RK3588_USB_GRF,
@@ -305,7 +309,7 @@ enum {
 static const MemMapEntry rk3588_memmap[] = {
     [RK3588_SRAM] =         { 0x00000000, RK3588_SRAM_SIZE },
     [RK3588_ATAGS] =        { 0x001fe000, RK3588_ATAGS_SIZE },
-    [RK3588_RAM] =          { 0x00200000, 0 },
+    [RK3588_RAM] =          { RK3588_DEFAULT_RAM_BASE, 0 },
     /*
      * BL31 probes optional low-address payload metadata at 0x100000 before
      * normal DRAM starts.  Keep this as zeroed scratch RAM so that probe can
@@ -318,6 +322,8 @@ static const MemMapEntry rk3588_memmap[] = {
      * rk3588-scmi SysBusDevice (RAM-backed MMIO + the SCMI responder).
      */
     [RK3588_SCMI_SHMEM] =   { 0x0010f000, 0x00000100 },
+    [RK3588_USB3OTG0] =     { 0xfc000000,
+                              RK3588_DWC3_UDC_MMIO_SIZE },
     [RK3588_PMU0_GRF] =     { 0xfd588000, 0x00001000 },
     [RK3588_PMU1_GRF] =     { 0xfd58a000, 0x00001000 },
     [RK3588_USB_GRF] =      { 0xfd5ac000, 0x00001000 },
@@ -382,8 +388,15 @@ static const MemMapEntry rk3588_memmap[] = {
     [RK3588_UART2] =        { 0xfeb50000, 0x00000100 },
 };
 
+static hwaddr rk3588_ram_base(const RK3588MachineState *s)
+{
+    return s->zephyr_ram ? RK3588_ZEPHYR_RAM_BASE :
+                           rk3588_memmap[RK3588_RAM].base;
+}
+
 enum {
     RK3588_GIC_MAINT_PPI = 9,
+    RK3588_USB3OTG0_SPI = 220,
     RK3588_SDMMC_SPI = 203,
     RK3588_SDHCI_SPI = 205,
     RK3588_RKNN0_SPI = 110,
@@ -1440,7 +1453,7 @@ static void rk3588_write_atags(RK3588MachineState *s)
     uint8_t *ddr_tag = base + 8 + 12;
     uint32_t core_size_words = (8 + 12) / sizeof(uint32_t);
     uint32_t ddr_size_words = (8 + 184) / sizeof(uint32_t);
-    uint64_t ddr_size = rk3588_memmap[RK3588_RAM].base + ms->ram_size;
+    uint64_t ddr_size = rk3588_ram_base(s) + ms->ram_size;
 
     memset(base, 0, RK3588_ATAGS_SIZE);
 
@@ -1798,7 +1811,7 @@ static void rk3588_create_zvm_ram(RK3588MachineState *s)
 {
     MachineState *ms = MACHINE(s);
     MemoryRegion *sysmem = get_system_memory();
-    hwaddr main_ram_limit = rk3588_memmap[RK3588_RAM].base + ms->ram_size;
+    hwaddr main_ram_limit = rk3588_ram_base(s) + ms->ram_size;
     hwaddr low_base;
 
     if (!s->zvm_ram) {
@@ -2196,10 +2209,10 @@ static bool rk3588_bootrom_prepare_fit_handoff(RK3588MachineState *s,
         error_setg(errp, "FIT ATF image lies outside RK3588 SRAM");
         return false;
     }
-    if (uboot.load < rk3588_memmap[RK3588_RAM].base ||
-        uboot.load - rk3588_memmap[RK3588_RAM].base >= ms->ram_size ||
+    if (uboot.load < rk3588_ram_base(s) ||
+        uboot.load - rk3588_ram_base(s) >= ms->ram_size ||
         uboot.size > ms->ram_size -
-                     (uboot.load - rk3588_memmap[RK3588_RAM].base)) {
+                     (uboot.load - rk3588_ram_base(s))) {
         error_setg(errp, "FIT U-Boot image lies outside guest RAM");
         return false;
     }
@@ -2494,7 +2507,8 @@ static void rk3588_create_uart(RK3588MachineState *s)
      */
     serial_mm_init(get_system_memory(), rk3588_memmap[RK3588_UART2].base, 2,
                    qdev_get_gpio_in(s->gic, RK3588_UART2_SPI),
-                   RK3588_UART_BAUDBASE, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+                   RK3588_UART_BAUDBASE,
+                   serial_hd(s->zephyr_ram ? 1 : 0), DEVICE_LITTLE_ENDIAN);
 
     vendor = qdev_new(TYPE_DW_APB_UART_VENDOR);
     vendor_sbd = SYS_BUS_DEVICE(vendor);
@@ -2911,6 +2925,24 @@ static void rk3588_create_usb2_host(RK3588MachineState *s)
     object_unref(OBJECT(dev));
 }
 
+static void rk3588_create_usb3_device(RK3588MachineState *s)
+{
+    DeviceState *dev = qdev_new(TYPE_RK3588_DWC3_UDC);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+
+    if (s->zephyr_ram) {
+        qdev_prop_set_chr(dev, "chardev", serial_hd(0));
+    }
+    object_property_add_child(OBJECT(s), "usb3otg0", OBJECT(dev));
+    sysbus_realize(sbd, &error_fatal);
+    sysbus_mmio_map(sbd, 0, rk3588_memmap[RK3588_USB3OTG0].base);
+    sysbus_connect_irq(sbd, 0,
+                       qdev_get_gpio_in(s->gic, RK3588_USB3OTG0_SPI));
+
+    s->dwc3_udc = RK3588_DWC3_UDC(dev);
+    object_unref(OBJECT(dev));
+}
+
 /*
  * Per-machine SMC handler entry. Registered with
  * arm_register_psci_smc_handler() so accelerator SMC exception paths can run it
@@ -3091,6 +3123,8 @@ static void rk3588_init(MachineState *machine)
 {
     RK3588MachineState *s = RK3588_MACHINE(machine);
     const RK3588BoardConfig *board = s->board;
+    hwaddr ram_base = rk3588_ram_base(s);
+    hwaddr max_ram_size = rk3588_memmap[RK3588_GIC_DIST].base - ram_base;
 
     if (machine->smp.cpus > RK3588_MAX_CPUS ||
         machine->smp.max_cpus > RK3588_MAX_CPUS) {
@@ -3099,8 +3133,8 @@ static void rk3588_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
-    if (machine->ram_size > RK3588_MAX_RAM_SIZE) {
-        g_autofree char *sz = size_to_str(RK3588_MAX_RAM_SIZE);
+    if (machine->ram_size > max_ram_size) {
+        g_autofree char *sz = size_to_str(max_ram_size);
         error_report("%s: RAM size must not exceed %s",
                      board->machine_name, sz);
         exit(EXIT_FAILURE);
@@ -3111,7 +3145,7 @@ static void rk3588_init(MachineState *machine)
     rk3588_create_atf_ddr(s);
     rk3588_create_firmware_mmio(s);
     memory_region_add_subregion(get_system_memory(),
-                                rk3588_memmap[RK3588_RAM].base,
+                                ram_base,
                                 machine->ram);
     rk3588_create_zvm_ram(s);
 
@@ -3121,6 +3155,7 @@ static void rk3588_init(MachineState *machine)
     rk3588_create_cru(s);
     rk3588_create_stimer(s);
     rk3588_create_ddr(s);
+    rk3588_create_usb3_device(s);
     rk3588_create_usb2_host(s);
     rk3588_create_scmi(s);
     rk3588_create_secure_otp(s);
@@ -3134,7 +3169,7 @@ static void rk3588_init(MachineState *machine)
     rk3588_create_pcie(s);
 
     s->bootinfo = (struct arm_boot_info) {
-        .loader_start = rk3588_memmap[RK3588_RAM].base,
+        .loader_start = ram_base,
         .board_id = -1,
         .ram_size = machine->ram_size,
         .psci_conduit = QEMU_PSCI_CONDUIT_SMC,
@@ -3143,7 +3178,7 @@ static void rk3588_init(MachineState *machine)
 
     rk3588_enable_psci_conduit(s);
 
-    if (qtest_enabled()) {
+    if (qtest_enabled() && !machine->kernel_filename) {
         return;
     }
 
@@ -3229,6 +3264,20 @@ static void rk3588_set_rknpu(Object *obj, bool value, Error **errp)
     s->rknpu = value;
 }
 
+static bool rk3588_get_zephyr_ram(Object *obj, Error **errp)
+{
+    RK3588MachineState *s = RK3588_MACHINE(obj);
+
+    return s->zephyr_ram;
+}
+
+static void rk3588_set_zephyr_ram(Object *obj, bool value, Error **errp)
+{
+    RK3588MachineState *s = RK3588_MACHINE(obj);
+
+    s->zephyr_ram = value;
+}
+
 void rk3588_machine_instance_configure(Object *obj,
                                        const RK3588BoardConfig *board)
 {
@@ -3273,6 +3322,12 @@ void rk3588_machine_class_configure(ObjectClass *oc,
     object_class_property_set_description(oc, "rknpu",
                                           "Enable RK3588 RKNN/RKNPU "
                                           "accelerator cores");
+
+    object_class_property_add_bool(oc, "zephyr-ram", rk3588_get_zephyr_ram,
+                                   rk3588_set_zephyr_ram);
+    object_class_property_set_description(oc, "zephyr-ram",
+                                          "Place direct-kernel RAM at "
+                                          "0x10000000 for Zephyr board images");
 }
 
 static const TypeInfo rk3588_machine_typeinfo = {
