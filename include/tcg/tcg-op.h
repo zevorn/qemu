@@ -83,6 +83,7 @@ typedef TCGv_i64 TCGv;
 #define tcg_gen_shri_tl tcg_gen_shri_i64
 #define tcg_gen_sar_tl tcg_gen_sar_i64
 #define tcg_gen_sari_tl tcg_gen_sari_i64
+#define tcg_gen_lea_tl tcg_gen_lea_i64
 #define tcg_gen_brcond_tl tcg_gen_brcond_i64
 #define tcg_gen_brcondi_tl tcg_gen_brcondi_i64
 #define tcg_gen_setcond_tl tcg_gen_setcond_i64
@@ -174,6 +175,8 @@ typedef TCGv_i64 TCGv;
 #define tcg_gen_atomic_umax_fetch_tl tcg_gen_atomic_umax_fetch_i64
 #define tcg_gen_dup_tl_vec  tcg_gen_dup_i64_vec
 #define tcg_gen_dup_tl tcg_gen_dup_i64
+#define tcg_gen_goto_jc_tl tcg_gen_goto_jc_i64
+#define tcg_gen_goto_jc3_tl tcg_gen_goto_jc3_i64
 #define dup_const_tl dup_const
 #else
 #define tcg_gen_movi_tl tcg_gen_movi_i32
@@ -209,6 +212,7 @@ typedef TCGv_i64 TCGv;
 #define tcg_gen_shri_tl tcg_gen_shri_i32
 #define tcg_gen_sar_tl tcg_gen_sar_i32
 #define tcg_gen_sari_tl tcg_gen_sari_i32
+#define tcg_gen_lea_tl tcg_gen_lea_i32
 #define tcg_gen_brcond_tl tcg_gen_brcond_i32
 #define tcg_gen_brcondi_tl tcg_gen_brcondi_i32
 #define tcg_gen_setcond_tl tcg_gen_setcond_i32
@@ -297,6 +301,8 @@ typedef TCGv_i64 TCGv;
 #define tcg_gen_atomic_umax_fetch_tl tcg_gen_atomic_umax_fetch_i32
 #define tcg_gen_dup_tl_vec  tcg_gen_dup_i32_vec
 #define tcg_gen_dup_tl tcg_gen_dup_i32
+#define tcg_gen_goto_jc_tl tcg_gen_goto_jc_i32
+#define tcg_gen_goto_jc3_tl tcg_gen_goto_jc3_i32
 
 #define dup_const_tl(VECE, C)                                      \
     (__builtin_constant_p(VECE)                                    \

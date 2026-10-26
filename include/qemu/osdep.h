@@ -146,6 +146,11 @@ QEMU_EXTERN_C int daemon(int, int);
  */
 #undef FSCALE
 
+/*
+ * Avoid conflict with Windows TEXT definition from <winnt.h> header.
+ */
+#undef TEXT
+
 #ifdef CONFIG_IOVEC
 #include <sys/uio.h>
 #endif

@@ -460,8 +460,8 @@ static TCGv_i64 get_address(DisasContext *s, int x2, int b2, int d2)
      * displacements early we create larger immediate addends.
      */
     if (b2 && x2) {
-        tcg_gen_add_i64(tmp, regs[b2], regs[x2]);
-        gen_addi_and_wrap_i64(s, tmp, tmp, d2);
+        tcg_gen_lea_i64(tmp, regs[b2], regs[x2], 0, d2);
+        gen_addi_and_wrap_i64(s, tmp, tmp, 0);
     } else if (b2) {
         gen_addi_and_wrap_i64(s, tmp, regs[b2], d2);
     } else if (x2) {
@@ -636,6 +636,15 @@ static void gen_op_calc_cc(DisasContext *s)
 static bool use_goto_tb(DisasContext *s, uint64_t dest)
 {
     return translator_use_goto_tb(&s->base, dest);
+}
+
+static void gen_goto_jc(DisasContext *s)
+{
+    /*
+     * ex_value, aka cs_base, is only ever live at the start of a TB
+     * and is immediately cleared.  It is only ever set by op_ex().
+     */
+    tcg_gen_goto_jc3_i64(psw_addr, tcg_constant_i64(0), s->base.tb->flags);
 }
 
 static void account_noninline_branch(DisasContext *s, int cc_op)
@@ -1025,11 +1034,6 @@ typedef struct {
 
 /* Return values from translate_one, indicating the state of the TB.  */
 
-/* We are not using a goto_tb (for whatever reason), but have updated
-   the PC (for whatever reason), so there's no need to do it again on
-   exiting the TB.  */
-#define DISAS_PC_UPDATED        DISAS_TARGET_0
-
 /* We have updated the PC and CC values.  */
 #define DISAS_PC_CC_UPDATED     DISAS_TARGET_2
 
@@ -1087,11 +1091,11 @@ static DisasJumpType help_goto_direct(DisasContext *s, uint64_t dest)
         tcg_gen_goto_tb(0);
         tcg_gen_movi_i64(psw_addr, dest);
         tcg_gen_exit_tb(s->base.tb, 0);
-        return DISAS_NORETURN;
     } else {
         tcg_gen_movi_i64(psw_addr, dest);
-        return DISAS_PC_CC_UPDATED;
+        gen_goto_jc(s);
     }
+    return DISAS_NORETURN;
 }
 
 static DisasJumpType help_goto_indirect(DisasContext *s, TCGv_i64 dest)
@@ -1100,7 +1104,8 @@ static DisasJumpType help_goto_indirect(DisasContext *s, TCGv_i64 dest)
     per_breaking_event(s);
     tcg_gen_mov_i64(psw_addr, dest);
     per_branch(s, psw_addr);
-    return DISAS_PC_CC_UPDATED;
+    gen_goto_jc(s);
+    return DISAS_NORETURN;
 }
 
 static DisasJumpType help_branch(DisasContext *s, DisasCompare *c,
@@ -1162,7 +1167,7 @@ static DisasJumpType help_branch(DisasContext *s, DisasCompare *c,
         tcg_gen_goto_tb(0);
         tcg_gen_exit_tb(s->base.tb, 0);
     } else {
-        tcg_gen_lookup_and_goto_ptr();
+        gen_goto_jc(s);
     }
 
     gen_set_label(lab);
@@ -1172,9 +1177,10 @@ static DisasJumpType help_branch(DisasContext *s, DisasCompare *c,
     if (use_goto_tb(s, s->pc_tmp)) {
         tcg_gen_goto_tb(1);
         tcg_gen_exit_tb(s->base.tb, 1);
-        return DISAS_NORETURN;
+    } else {
+        gen_goto_jc(s);
     }
-    return DISAS_PC_CC_UPDATED;
+    return DISAS_NORETURN;
 }
 
 /* ====================================================================== */
@@ -6397,10 +6403,6 @@ static void s390x_tr_tb_stop(DisasContextBase *dcbase, CPUState *cs)
         break;
     case DISAS_TOO_MANY:
         update_psw_addr(dc);
-        /* FALLTHRU */
-    case DISAS_PC_UPDATED:
-        /* Next TB starts off with CC_OP_DYNAMIC, so make sure the
-           cc op type is in env */
         update_cc_op(dc);
         /* FALLTHRU */
     case DISAS_PC_CC_UPDATED:

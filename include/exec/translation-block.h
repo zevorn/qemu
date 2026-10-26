@@ -85,6 +85,7 @@ struct TranslationBlock {
 #define CF_PCREL         0x00020000 /* Opcodes in TB are PC-relative */
 #define CF_BP_PAGE       0x00040000 /* Breakpoint present in code page */
 #define CF_STEP_ATOMIC   0x00080000 /* Running in cpu_exec_step_atomic */
+#define CF_NO_GOTO_JC    0x00100000 /* Do not dispatch via the inline probe */
 #define CF_CLUSTER_MASK  0xff000000 /* Top 8 bits are cluster ID */
 #define CF_CLUSTER_SHIFT 24
 
@@ -92,11 +93,11 @@ struct TranslationBlock {
      * Above fields used for comparing
      */
 
+    struct tb_tc tc;
+
     /* size of target code for this block (1 <= size <= TARGET_PAGE_SIZE) */
     uint16_t size;
     uint16_t icount;
-
-    struct tb_tc tc;
 
     /*
      * Track tb_page_addr_t intervals that intersect this TB.

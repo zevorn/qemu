@@ -210,7 +210,8 @@ static bool tcg_target_const_match(int64_t val, int ct,
     return 0;
 }
 
-# define LOWREGMASK(x)	((x) & 7)
+#define LOWREGMASK(x)   ((x) & 7)
+#define REGOR0(x)       ((x) == TCG_REG_NONE ? 0 : (x))
 
 #define P_EXT		0x100		/* 0x0f opcode prefix */
 #define P_EXT38         0x200           /* 0x0f 0x38 opcode prefix */
@@ -525,7 +526,7 @@ static const uint8_t tcg_cond_to_jcc[] = {
     [TCG_COND_TSTNE] = JCC_JNE,
 };
 
-static void tcg_out_opc(TCGContext *s, int opc, int r, int rm, int x)
+static void tcg_out_opc(TCGContext *s, int opc, TCGReg r, TCGReg rm, TCGReg x)
 {
     int rex;
 
@@ -573,14 +574,14 @@ static void tcg_out_opc(TCGContext *s, int opc, int r, int rm, int x)
     tcg_out8(s, opc);
 }
 
-static void tcg_out_modrm(TCGContext *s, int opc, int r, int rm)
+static void tcg_out_modrm(TCGContext *s, int opc, TCGReg r, TCGReg rm)
 {
     tcg_out_opc(s, opc, r, rm, 0);
     tcg_out8(s, 0xc0 | (LOWREGMASK(r) << 3) | LOWREGMASK(rm));
 }
 
-static void tcg_out_vex_opc(TCGContext *s, int opc, int r, int v,
-                            int rm, int index)
+static void tcg_out_vex_opc(TCGContext *s, int opc, TCGReg r, TCGReg v,
+                            TCGReg rm, TCGReg index)
 {
     int tmp;
 
@@ -631,8 +632,8 @@ static void tcg_out_vex_opc(TCGContext *s, int opc, int r, int v,
     tcg_out8(s, opc);
 }
 
-static void tcg_out_evex_opc(TCGContext *s, int opc, int r, int v,
-                             int rm, int index, int aaa, bool z)
+static void tcg_out_evex_opc(TCGContext *s, int opc, TCGReg r, TCGReg v,
+                             TCGReg rm, TCGReg index, int aaa, bool z)
 {
     /* The entire 4-byte evex prefix; with R' and V' set. */
     uint32_t p = 0x08041062;
@@ -677,7 +678,8 @@ static void tcg_out_evex_opc(TCGContext *s, int opc, int r, int v,
     tcg_out8(s, opc);
 }
 
-static void tcg_out_vex_modrm(TCGContext *s, int opc, int r, int v, int rm)
+static void tcg_out_vex_modrm(TCGContext *s, int opc, TCGReg r,
+                              TCGReg v, TCGReg rm)
 {
     if (opc & P_EVEX) {
         tcg_out_evex_opc(s, opc, r, v, rm, 0, 0, false);
@@ -688,7 +690,7 @@ static void tcg_out_vex_modrm(TCGContext *s, int opc, int r, int v, int rm)
 }
 
 static void tcg_out_vex_modrm_type(TCGContext *s, int opc,
-                                   int r, int v, int rm, TCGType type)
+                                   TCGReg r, TCGReg v, TCGReg rm, TCGType type)
 {
     if (type == TCG_TYPE_V256) {
         opc |= P_VEXL;
@@ -696,8 +698,8 @@ static void tcg_out_vex_modrm_type(TCGContext *s, int opc,
     tcg_out_vex_modrm(s, opc, r, v, rm);
 }
 
-static void tcg_out_evex_modrm_type(TCGContext *s, int opc, int r, int v,
-                                    int rm, int aaa, bool z, TCGType type)
+static void tcg_out_evex_modrm_type(TCGContext *s, int opc, TCGReg r, TCGReg v,
+                                    TCGReg rm, int aaa, bool z, TCGType type)
 {
     if (type == TCG_TYPE_V256) {
         opc |= P_VEXL;
@@ -711,12 +713,12 @@ static void tcg_out_evex_modrm_type(TCGContext *s, int opc, int r, int v,
    mode for absolute addresses, ~RM is the size of the immediate operand
    that will follow the instruction.  */
 
-static void tcg_out_sib_offset(TCGContext *s, int r, int rm, int index,
+static void tcg_out_sib_offset(TCGContext *s, TCGReg r, TCGReg rm, TCGReg index,
                                int shift, intptr_t offset)
 {
     int mod, len;
 
-    if (index < 0 && rm < 0) {
+    if (index == TCG_REG_NONE && rm == TCG_REG_NONE) {
         /*
          * Try for a rip-relative addressing mode.  This has replaced
          * the 32-bit-mode absolute addressing encoding.
@@ -747,7 +749,7 @@ static void tcg_out_sib_offset(TCGContext *s, int r, int rm, int index,
 
     /* Find the length of the immediate addend.  Note that the encoding
        that would be used for (%ebp) indicates absolute addressing.  */
-    if (rm < 0) {
+    if (rm == TCG_REG_NONE) {
         mod = 0, len = 4, rm = 5;
     } else if (offset == 0 && LOWREGMASK(rm) != TCG_REG_EBP) {
         mod = 0, len = 0;
@@ -759,7 +761,7 @@ static void tcg_out_sib_offset(TCGContext *s, int r, int rm, int index,
 
     /* Use a single byte MODRM format if possible.  Note that the encoding
        that would be used for %esp is the escape to the two byte form.  */
-    if (index < 0 && LOWREGMASK(rm) != TCG_REG_ESP) {
+    if (index == TCG_REG_NONE && LOWREGMASK(rm) != TCG_REG_ESP) {
         /* Single byte MODRM format.  */
         tcg_out8(s, mod | (LOWREGMASK(r) << 3) | LOWREGMASK(rm));
     } else {
@@ -768,7 +770,7 @@ static void tcg_out_sib_offset(TCGContext *s, int r, int rm, int index,
         /* Note that the encoding that would place %esp into the index
            field indicates no index register.  In 64-bit mode, the REX.X
            bit counts, so %r12 can be used as the index.  */
-        if (index < 0) {
+        if (index == TCG_REG_NONE) {
             index = 4;
         } else {
             tcg_debug_assert(index != TCG_REG_ESP);
@@ -785,32 +787,34 @@ static void tcg_out_sib_offset(TCGContext *s, int r, int rm, int index,
     }
 }
 
-static void tcg_out_modrm_sib_offset(TCGContext *s, int opc, int r, int rm,
-                                     int index, int shift, intptr_t offset)
+static void tcg_out_modrm_sib_offset(TCGContext *s, int opc, TCGReg r,
+                                     TCGReg rm, TCGReg index,
+                                     int shift, intptr_t offset)
 {
-    tcg_out_opc(s, opc, r, rm < 0 ? 0 : rm, index < 0 ? 0 : index);
+    tcg_out_opc(s, opc, r, REGOR0(rm), REGOR0(index));
     tcg_out_sib_offset(s, r, rm, index, shift, offset);
 }
 
-static void tcg_out_vex_modrm_sib_offset(TCGContext *s, int opc, int r, int v,
-                                         int rm, int index, int shift,
+static void tcg_out_vex_modrm_sib_offset(TCGContext *s, int opc,
+                                         TCGReg r, TCGReg v, TCGReg rm,
+                                         TCGReg index, int shift,
                                          intptr_t offset)
 {
-    tcg_out_vex_opc(s, opc, r, v, rm < 0 ? 0 : rm, index < 0 ? 0 : index);
+    tcg_out_vex_opc(s, opc, r, v, REGOR0(rm), REGOR0(index));
     tcg_out_sib_offset(s, r, rm, index, shift, offset);
 }
 
 /* A simplification of the above with no index or shift.  */
-static inline void tcg_out_modrm_offset(TCGContext *s, int opc, int r,
-                                        int rm, intptr_t offset)
+static void tcg_out_modrm_offset(TCGContext *s, int opc, TCGReg r,
+                                 TCGReg rm, intptr_t offset)
 {
-    tcg_out_modrm_sib_offset(s, opc, r, rm, -1, 0, offset);
+    tcg_out_modrm_sib_offset(s, opc, r, rm, TCG_REG_NONE, 0, offset);
 }
 
-static inline void tcg_out_vex_modrm_offset(TCGContext *s, int opc, int r,
-                                            int v, int rm, intptr_t offset)
+static void tcg_out_vex_modrm_offset(TCGContext *s, int opc, TCGReg r,
+                                     TCGReg v, TCGReg rm, intptr_t offset)
 {
-    tcg_out_vex_modrm_sib_offset(s, opc, r, v, rm, -1, 0, offset);
+    tcg_out_vex_modrm_sib_offset(s, opc, r, v, rm, TCG_REG_NONE, 0, offset);
 }
 
 /* Output an opcode with an expected reference to the constant pool.  */
@@ -1528,6 +1532,12 @@ static int tcg_out_cmp(TCGContext *s, TCGCond cond, TCGArg arg1,
     return jz;
 }
 
+static void tgen_cmp_mem_reg(TCGContext *s, int rexw, TCGReg reg,
+                             TCGReg base, intptr_t ofs)
+{
+    tcg_out_modrm_offset(s, OPC_CMP_GvEv | rexw, reg, base, ofs);
+}
+
 static void tcg_out_brcond(TCGContext *s, int rexw, TCGCond cond,
                            TCGArg arg1, TCGArg arg2, int const_arg2,
                            TCGLabel *label, bool small)
@@ -1890,7 +1900,7 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
 
 #ifdef CONFIG_USER_ONLY
 static HostAddress x86_guest_base = {
-    .index = -1
+    .index = TCG_REG_NONE
 };
 
 #if defined(__linux__)
@@ -2174,7 +2184,7 @@ static void tgen_qemu_ld(TCGContext *s, TCGType type, TCGReg data,
     HostAddress h;
 
     ldst = prepare_host_addr(s, &h, addr, oi, true);
-    tcg_out_qemu_ld_direct(s, data, -1, h, type, get_memop(oi));
+    tcg_out_qemu_ld_direct(s, data, TCG_REG_NONE, h, type, get_memop(oi));
 
     if (ldst) {
         ldst->type = type;
@@ -2312,7 +2322,7 @@ static void tgen_qemu_st(TCGContext *s, TCGType type, TCGReg data,
     HostAddress h;
 
     ldst = prepare_host_addr(s, &h, addr, oi, false);
-    tcg_out_qemu_st_direct(s, data, -1, h, get_memop(oi));
+    tcg_out_qemu_st_direct(s, data, TCG_REG_NONE, h, get_memop(oi));
 
     if (ldst) {
         ldst->type = type;
@@ -3355,6 +3365,92 @@ static const TCGOutOpStore outop_st = {
     .base.static_constraint = C_O0_I2(re, r),
     .out_r = tcg_out_st,
     .out_i = tgen_st_i,
+};
+
+static void tgen_lea(TCGContext *s, TCGType type, TCGReg a0, TCGReg a1,
+                     TCGReg a2, unsigned sh, tcg_target_long imm)
+{
+    int rexw = type == TCG_TYPE_I32 ? 0 : P_REXW;
+    tcg_out_modrm_sib_offset(s, OPC_LEA + rexw, a0, a1, a2, sh, imm);
+}
+
+static const TCGOutOpLea outop_lea = {
+    /* Allow "lea imm(, a2, sh), a0" via TCG_REG_ZERO constraint */
+    .base.static_constraint = C_O1_I2(r, rz, r),
+    .out = tgen_lea,
+};
+
+static void tgen_goto_jc_cmp_part(TCGContext *s, TCGArg val, bool const_val,
+                                  TCGReg scratch, const TranslationBlock *tb,
+                                  TCGReg base, ptrdiff_t ofs)
+{
+    if (!const_val) {
+        /* cmpq ofs(base), %val */
+        tgen_cmp_mem_reg(s, P_REXW, val, base, ofs);
+    } else if (val == (int8_t)val) {
+        tcg_out_modrm_offset(s, OPC_ARITH_EvIb | P_REXW, ARITH_CMP, base, ofs);
+        tcg_out8(s, val);
+    } else if (val == (int32_t)val) {
+        tcg_out_modrm_offset(s, OPC_ARITH_EvIz | P_REXW, ARITH_CMP, base, ofs);
+        tcg_out32(s, val);
+    } else {
+        uintptr_t tb_slot = (uintptr_t)tb + ofs;
+
+        tcg_out_ld(s, TCG_TYPE_I64, scratch, base, ofs);
+        /*
+         * Compare the value vs a rip-relative reference.
+         * If the value is unchanged from the current TB,
+         * we can reuse that.  Otherwise drop it in the pool.
+         */
+        if (val == *(uint64_t *)tb_slot) {
+            tcg_out_modrm_sib_offset(s, OPC_CMP_GvEv | P_REXW, scratch,
+                                     TCG_REG_NONE, TCG_REG_NONE, 0, tb_slot);
+        } else {
+            tcg_out_modrm_pool(s, OPC_CMP_GvEv | P_REXW, scratch);
+            new_pool_label(s, val, R_386_PC32, s->code_ptr - 4, -4);
+        }
+    }
+}
+
+static void tgen_goto_jc(TCGContext *s, TCGReg ptr, TCGReg pc,
+                         TCGArg cs, bool const_cs, TCGArg fl, bool const_fl,
+                         TCGLabel *label)
+{
+    const TranslationBlock *tb = s->gen_tb;
+    unsigned free = (ALL_GENERAL_REGS & ~s->reserved_regs & ~(1 << ptr)
+                     & ~(const_fl ? 0 : 1 << fl));
+    TCGReg scratch = ctz32(free);
+
+    /* ptr is CPUJumpCache */
+
+    /* Validate pc match */
+    tgen_cmp_mem_reg(s, P_REXW, pc, ptr, offsetof(CPUJumpCache, array[0].pc));
+    tcg_out_jxx(s, JCC_JNE, label, true);
+
+    /* Load and validate tb non-null */
+    tcg_out_ld(s, TCG_TYPE_PTR, ptr, ptr, offsetof(CPUJumpCache, array[0].tb));
+    tcg_out_brcond(s, P_REXW, TCG_COND_EQ, ptr, 0, true, label, true);
+
+    /* ptr is now TranslationBlock */
+
+    /* Validate cs_base match */
+    tgen_goto_jc_cmp_part(s, cs, const_cs, scratch, tb, ptr,
+                          offsetof(TranslationBlock, cs_base));
+    tcg_out_jxx(s, JCC_JNE, label, true);
+
+    /* Validate cflags:flags match */
+    tgen_goto_jc_cmp_part(s, fl, const_fl, scratch, tb, ptr,
+                          offsetof(TranslationBlock, flags));
+    tcg_out_jxx(s, JCC_JNE, label, true);
+
+    /* Jump to tb */
+    tcg_out_modrm_offset(s, OPC_GRP5, EXT5_JMPN_Ev,
+                         ptr, offsetof(TranslationBlock, tc.ptr));
+}
+
+static const TCGOutOpGotoJC outop_goto_jc = {
+    .base.static_constraint = C_O0_I4(r, r, ri, ri),
+    .out = tgen_goto_jc,
 };
 
 static int const umin_insn[4] = {
