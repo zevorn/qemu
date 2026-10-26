@@ -1030,15 +1030,15 @@ static void gen_muls2(TCGType type, TCGTemp *rl, TCGTemp *rh,
 {
     if (tcg_op_supported(INDEX_op_muls2, type, 0)) {
         gen_op_tttt(INDEX_op_muls2, type, rl, rh, src1, src2);
-    } else if (tcg_op_supported(INDEX_op_mulsh, TCG_TYPE_I32, 0)) {
+    } else if (tcg_op_supported(INDEX_op_mulsh, type, 0)) {
         g_autoptr(TCGTemp) t = tcg_temp_new_ebb(type);
 
         gen_mul(type, t, src1, src2);
         gen_op_ttt(INDEX_op_mulsh, type, rh, src1, src2);
         gen_mov(type, rl, t);
     } else if (type == TCG_TYPE_I32) {
-        g_autoptr(TCGTemp) t0 = tcg_temp_new_ebb(type);
-        g_autoptr(TCGTemp) t1 = tcg_temp_new_ebb(type);
+        g_autoptr(TCGTemp) t0 = tcg_temp_new_ebb(TCG_TYPE_I64);
+        g_autoptr(TCGTemp) t1 = tcg_temp_new_ebb(TCG_TYPE_I64);
 
         /* Simply extend and use host 64-bit multiply. */
         gen_ext_i32_i64(t0, src1);
