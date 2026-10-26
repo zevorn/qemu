@@ -76,6 +76,11 @@ void tcg_update_cflags(CPUState *cpu)
         cflags |= CF_NO_GOTO_JC;
     }
 
+    /* Execution logging is emitted by helper_lookup_tb_ptr(). */
+    if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+        cflags |= CF_NO_GOTO_JC;
+    }
+
     cpu->tcg_cflags = cflags;
 }
 
