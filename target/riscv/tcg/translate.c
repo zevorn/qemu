@@ -295,6 +295,33 @@ static void lookup_and_goto_ptr(DisasContext *ctx)
     tcg_gen_lookup_and_goto_ptr();
 }
 
+static void gen_goto_jc(DisasContext *ctx, bool lp_expected)
+{
+    uint32_t flags = ctx->base.tb->flags;
+    TCGv pc = cpu_pc;
+
+    /* Nonzero vstart hides whether vl equals vlmax in the TB flags. */
+    if (ctx->itrigger || ctx->sdext_step ||
+        (ctx->cfg_ptr->ext_zve32x &&
+         !FIELD_EX32(flags, TB_FLAGS, VSTART_EQ_ZERO))) {
+        lookup_and_goto_ptr(ctx);
+        return;
+    }
+
+    flags = FIELD_DP32(flags, TB_FLAGS, FS, ctx->mstatus_fs);
+    flags = FIELD_DP32(flags, TB_FLAGS, VS, ctx->mstatus_vs);
+    if (ctx->fcfi_enabled) {
+        flags = FIELD_DP32(flags, TB_FLAGS, FCFI_LP_EXPECTED, lp_expected);
+    }
+
+    /* get_tb_cpu_state() reports the zero-extended RV32 virtual PC. */
+    if (get_xl(ctx) == MXL_RV32) {
+        pc = tcg_temp_new();
+        tcg_gen_ext32u_tl(pc, cpu_pc);
+    }
+    tcg_gen_goto_jc3_tl(pc, tcg_constant_i64(ctx->base.tb->cs_base), flags);
+}
+
 static void exit_tb(DisasContext *ctx)
 {
 #ifndef CONFIG_USER_ONLY
@@ -337,7 +364,7 @@ static void gen_goto_tb(DisasContext *ctx, unsigned tb_slot_idx,
         tcg_gen_exit_tb(ctx->base.tb, tb_slot_idx);
     } else {
         gen_update_pc(ctx, diff);
-        lookup_and_goto_ptr(ctx);
+        gen_goto_jc(ctx, ctx->fcfi_lp_expected);
     }
 }
 

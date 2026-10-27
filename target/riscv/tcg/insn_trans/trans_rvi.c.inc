@@ -143,6 +143,7 @@ static bool trans_jalr(DisasContext *ctx, arg_jalr *a)
     TCGLabel *misaligned = NULL;
     TCGv target_pc = tcg_temp_new();
     TCGv succ_pc = dest_gpr(ctx, a->rd);
+    bool lp_expected = ctx->fcfi_lp_expected;
 
     tcg_gen_addi_tl(target_pc, get_gpr(ctx, a->rs1, EXT_NONE), a->imm);
     tcg_gen_andi_tl(target_pc, target_pc, (target_ulong)-2);
@@ -180,10 +181,11 @@ static bool trans_jalr(DisasContext *ctx, arg_jalr *a)
         if (a->rs1 != xRA && a->rs1 != xT0 && a->rs1 != xT2) {
             tcg_gen_st8_tl(tcg_constant_tl(1),
                           tcg_env, offsetof(CPURISCVState, elp));
+            lp_expected = true;
         }
     }
 
-    lookup_and_goto_ptr(ctx);
+    gen_goto_jc(ctx, lp_expected);
 
     if (misaligned) {
         gen_set_label(misaligned);
